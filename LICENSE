@@ -1,4 +1,4 @@
-MIT License
+MIT License with Attribution
 
 Copyright (c) 2026 dimalinau-lab
 
@@ -9,8 +9,15 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+2. Attribution Requirement: Any distribution, modification, fork, or inclusion 
+   of this Software (in whole or in part, in source or binary form, including 
+   derivative works) must prominently display attribution to the original author:
+   "Original work by dimalinau-lab (https://github.com/dimalinau-lab)"
+   in all user-facing documentation, relevant "About" or credits dialogs, 
+   and promotional materials related to the derivative work.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
