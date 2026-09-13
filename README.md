@@ -6,10 +6,10 @@
 [![C++20](https://img.shields.io/badge/C++-20-blue.svg?style=for-the-badge&logo=cplusplus)](https://isocpp.org/)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-green.svg?style=for-the-badge&logo=android)](https://developer.android.com/)
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6.svg?style=for-the-badge&logo=windows)](https://www.microsoft.com/)
-[![DirectShow](https://img.shields.io/badge/Driver-DirectShow%20%2F%20MF-orange.svg?style=for-the-badge)](https://docs.microsoft.com/en-us/windows/win32/directshow/directshow)
+[![PC Client](https://img.shields.io/badge/PC%20Client-Virtual--Camera-007ACC.svg?style=for-the-badge&logo=github)](https://github.com/dimalinau-lab/Virtual-Camera)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-**VirtualCamNative** is a zero-cost, open-source, ultra-low latency system designed to replace commercial proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, zero-copy CameraX surface pipelines, and a native **C++20 DirectShow / Media Foundation virtual camera driver**, VirtualCamNative streams pristine, smooth 1080p/60fps video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with under **30–40ms glass-to-glass latency**.
+**VirtualCamNative** is a zero-cost, open-source, ultra-low latency system designed to replace commercial proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, zero-copy CameraX surface pipelines, and a native **C++20 DirectShow / Media Foundation virtual camera driver** ([dimalinau-lab/Virtual-Camera](https://github.com/dimalinau-lab/Virtual-Camera)), VirtualCamNative streams pristine, smooth 1080p/60fps video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with under **30–40ms glass-to-glass latency**.
 
 ---
 
@@ -22,7 +22,7 @@
 - 📱 **Hardware Screen Blackout Mode**  
   Prevents OLED/AMOLED screen burn-in and conserves battery during long streams by reducing backlight intensity (`0.01f`) with a full-screen tap-to-wake overlay.
 - 🛰️ **Dual Connection Modes & Auto-Discovery**  
-  - **USB Mode:** Zero-lag streaming via `adb forward`.  
+  - **USB Mode:** Zero-lag streaming via automatic ADB port forwarding.  
   - **Wi-Fi Mode:** Automatic local network device discovery via **UDP Beacon Broadcasting** (`255.255.255.255:8888`) — no manual IP entry required.
 - 🔄 **Instant Orientation & Camera Switching**  
   Switch between landscape/portrait aspect ratios or front/back cameras dynamically without disconnecting the RTSP/TCP socket or recreating the video encoder.
@@ -64,6 +64,7 @@
                                        v
  +-------------------------------------------------------------------------------+
  |                        WINDOWS NATIVE CLIENT (C++20)                          |
+ |              ( https://github.com/dimalinau-lab/Virtual-Camera )              |
  |                                                                               |
  |  [ Socket Receiver ] ---> [ FFmpeg libavcodec ] ---> [ Fast Frame Rotator ]   |
  |                                                                               |
@@ -92,18 +93,13 @@
 ### USB Mode (Lowest Latency)
 1. Enable **USB Debugging** on your Android phone (*Settings -> Developer Options -> USB Debugging*).
 2. Connect your phone to your PC via USB cable.
-3. Setup ADB port forwarding:
-   ```bash
-   adb forward tcp:8080 tcp:8080
-   adb forward tcp:8554 tcp:8554
-   ```
-4. Launch **VirtualCamNative** on your phone and open the Windows Desktop Client.
-5. Select **USB Mode** and click **Connect**.
+3. Launch **VirtualCamNative** on your phone and open the [PC Client](https://github.com/dimalinau-lab/Virtual-Camera).
+4. Select **USB Mode** and click **Connect** (the PC client configures ADB port forwarding automatically).
 
 ### Wi-Fi Mode (Wireless)
 1. Connect both your phone and PC to the same local Wi-Fi router network.
 2. Open **VirtualCamNative** on your phone.
-3. The PC client will automatically detect your device via **UDP Discovery** (`255.255.255.255:8888`).
+3. The [PC Client](https://github.com/dimalinau-lab/Virtual-Camera) will automatically detect your device via **UDP Discovery** (`255.255.255.255:8888`).
 4. Click **Connect** on the PC client to begin streaming.
 
 ---
@@ -140,7 +136,7 @@ curl "http://192.168.1.45:8080/api/orientation?mode=horizontal"
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/Virtual-Camera-Android.git
+git clone https://github.com/dimalinau-lab/Virtual-Camera-Android.git
 cd Virtual-Camera-Android
 
 # Build Debug APK
@@ -148,6 +144,9 @@ cd Virtual-Camera-Android
 ```
 
 ### Windows Client & Virtual Camera Driver
+The Windows PC client software and C++ virtual camera driver source code are hosted separately:
+👉 **[Virtual-Camera Repository on GitHub](https://github.com/dimalinau-lab/Virtual-Camera)**
+
 - **Toolchain:** Visual Studio 2022 (Desktop development with C++ v143, C++20 standard), CMake 3.22+, `vcpkg`.
 - **Dependencies:** FFmpeg (`libavcodec`, `libavutil`, `libswscale`), Microsoft Edge WebView2.
 
@@ -190,7 +189,7 @@ Ensure that target resolutions sent via `/api/config` use dimensions divisible b
 
 ## 🤝 Contributing
 
-Contributions, bug reports, and feature requests are welcome! Feel free to check the [Issues](https://github.com/your-username/Virtual-Camera-Android/issues) page.
+Contributions, bug reports, and feature requests are welcome! Feel free to check the [Issues](https://github.com/dimalinau-lab/Virtual-Camera-Android/issues) page.
 
 1. Fork the Project
 2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
