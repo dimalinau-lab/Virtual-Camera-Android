@@ -18,7 +18,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
-import android.widget.FrameLayout
 
 class OverlayController(private val context: Context) {
 
@@ -54,7 +53,7 @@ class OverlayController(private val context: Context) {
 
         try {
             val inflater = LayoutInflater.from(context)
-            val view = inflater.inflate(R.layout.overlay_floating_widget, null) as FrameLayout
+            val view = inflater.inflate(R.layout.overlay_floating_widget, null)
             overlayView = view
 
             statusDot = view.findViewById(R.id.statusDot)
@@ -67,7 +66,7 @@ class OverlayController(private val context: Context) {
             isOverlayShown = true
 
             updateStatusVisuals(currentStatus)
-            Log.i(TAG, "Плавающая точка-индикатор отображена")
+            Log.i(TAG, "Плавающая точка-индикатор отображена на экране")
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка при добавлении точки-индикатора", e)
         }

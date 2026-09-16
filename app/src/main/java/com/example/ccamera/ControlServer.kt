@@ -23,12 +23,15 @@ class ControlServer(
         val isStreaming: Boolean,
         val cameraFacing: String,
         val isTorchOn: Boolean,
-        val orientation: String = "vertical"
+        val orientation: String = "vertical",
+        val isMicMuted: Boolean = false
     )
 
     companion object {
         private const val TAG = "ControlServer"
     }
+
+    private var lastConfigTime = 0L
 
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
@@ -78,9 +81,17 @@ class ControlServer(
                     )
                 }
                 "/api/config" -> {
+                    val now = System.currentTimeMillis()
+                    if (now - lastConfigTime < 300) {
+                        Log.w("ROUTING_DEBUG", "Пропуск дублирующего запроса config (дребезг ${now - lastConfigTime}мс)")
+                        return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"message\":\"debounced\"}")
+                    }
+                    lastConfigTime = now
+
                     val resolution = jsonObj?.optString("resolution", "1080p") ?: parms["resolution"]?.firstOrNull() ?: "1080p"
                     val fps = jsonObj?.optInt("fps", 30) ?: parms["fps"]?.firstOrNull()?.toIntOrNull() ?: 30
                     val bitrate = jsonObj?.optInt("bitrate", 7_000_000) ?: parms["bitrate"]?.firstOrNull()?.toIntOrNull() ?: 7_000_000
+                    Log.i("ROUTING_DEBUG", "ControlServer: /api/config -> resolution=$resolution, fps=$fps, bitrate=$bitrate")
                     callback.onConfigUpdated(resolution, fps, bitrate)
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\"}")
                 }
@@ -90,9 +101,17 @@ class ControlServer(
                         if (postData.contains("toggle_blackout")) action = "toggle_blackout"
                         else if (postData.contains("switch_camera")) action = "switch_camera"
                         else if (postData.contains("toggle_torch")) action = "toggle_torch"
+                        else if (postData.contains("toggle_mic_mute")) action = "toggle_mic_mute"
                     }
                     if (action.isNotBlank()) {
                         callback.onActionRequested(action)
+                    }
+                    if (action == "toggle_mic_mute") {
+                        val status = callback.getStatus()
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"ok\",\"action\":\"$action\",\"mic_muted\":${status.isMicMuted}}"
+                        )
                     }
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"action\":\"$action\"}")
                 }
@@ -104,6 +123,7 @@ class ControlServer(
                         put("camera", status.cameraFacing)
                         put("torch", status.isTorchOn)
                         put("orientation", status.orientation)
+                        put("mic_muted", status.isMicMuted)
                     }.toString()
                     return newJsonResponse(Response.Status.OK, responseJson)
                 }

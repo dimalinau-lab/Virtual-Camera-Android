@@ -9,25 +9,25 @@
 [![PC Client](https://img.shields.io/badge/PC%20Client-Virtual--Camera-007ACC.svg?style=for-the-badge&logo=github)](https://github.com/dimalinau-lab/Virtual-Camera)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-**VirtualCamNative** is a zero-cost, open-source, ultra-low latency system designed to replace commercial proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, zero-copy CameraX surface pipelines, and a native **C++20 DirectShow / Media Foundation virtual camera driver** ([dimalinau-lab/Virtual-Camera](https://github.com/dimalinau-lab/Virtual-Camera)), VirtualCamNative streams pristine, smooth 1080p/60fps video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with under **30–40ms glass-to-glass latency**.
+**VirtualCamNative** is a zero-cost, open-source, ultra-low latency system designed to replace commercial proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, pure zero-copy **Camera2 API** surface pipelines, and a native **C++20 DirectShow / Media Foundation virtual camera driver** ([dimalinau-lab/Virtual-Camera](https://github.com/dimalinau-lab/Virtual-Camera)), VirtualCamNative streams pristine, smooth 1080p/60fps video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with under **30–40ms glass-to-glass latency**.
 
 ---
 
 ## 🌟 Key Features
 
 - ⚡ **Ultra-Low Latency (< 40ms Glass-to-Glass)**  
-  Custom raw TCP transport layer (`TCP_NODELAY`, 256KB non-blocking socket buffers, single-frame TCP flushes) paired with hardware HEVC decoding for real-time responsiveness.
+  Custom raw TCP transport layer (`TCP_NODELAY`, optimized 64KB socket buffers) paired with advanced `MediaCodec` tuning (Intra Refresh, `KEY_LOW_LATENCY`, Zero B-Frames, and maximum thread priority) for instantaneous responsiveness.
 - 🎬 **Hardware HEVC / H.265 Compression**  
-  Uses Android's GPU `MediaCodec` hardware encoder with CBR/VBR modes to maximize image sharpness while minimizing CPU usage and thermal throttling on mobile devices.
-- 📱 **Hardware Screen Blackout Mode**  
-  Prevents OLED/AMOLED screen burn-in and conserves battery during long streams by reducing backlight intensity (`0.01f`) with a full-screen tap-to-wake overlay.
+  Uses Android's GPU `MediaCodec` hardware encoder (CBR mode) to maximize image sharpness and save network bandwidth while eliminating CPU thermal throttling on mobile devices.
+- 📱 **Live Local Viewfinder & Blackout Mode**  
+  Simultaneously routes zero-copy frames to both the PC hardware encoder and the local smartphone screen (`SurfaceView`/`TextureView`) so the operator can see the live feed. Includes a tap-to-wake hardware screen blackout overlay (`0.01f` backlight) to prevent OLED burn-in and conserve battery.
 - 🛰️ **Dual Connection Modes & Auto-Discovery**  
   - **USB Mode:** Zero-lag streaming via automatic ADB port forwarding.  
   - **Wi-Fi Mode:** Automatic local network device discovery via **UDP Beacon Broadcasting** (`255.255.255.255:8888`) — no manual IP entry required.
-- 🔄 **Instant Orientation & Camera Switching**  
-  Switch between landscape/portrait aspect ratios or front/back cameras dynamically without disconnecting the RTSP/TCP socket or recreating the video encoder.
-- 🔋 **Foreground Service Protection**  
-  Runs inside a dedicated Android `Foreground Service` (`camera` type) protected by `PARTIAL_WAKE_LOCK` and `WIFI_MODE_FULL_HIGH_PERF` to ensure rock-solid stability even when minimized.
+- 🔄 **Instant Orientation, FPS & Resolution Switching**  
+  Switch between landscape/portrait aspect ratios, adjust resolutions (720p/1080p/4K), or toggle FPS (30/60) dynamically. The pure `Camera2` implementation hot-swaps active capture sessions without tearing down the underlying `CameraDevice` or dropping the TCP socket. Network requests are safely debounced.
+- 🔋 **Foreground Service & Thread Safety**  
+  Runs inside a dedicated Android `Foreground Service` protected by `PARTIAL_WAKE_LOCK` and `WIFI_MODE_FULL_HIGH_PERF`. All hardware lifecycle events execute safely on an isolated `HandlerThread` to prevent Main Thread blocks and HAL crashes (e.g., MediaTek `onError: 4`).
 - 🎯 **Minimalist Floating Status Widget**  
   Includes a draggable, magnetic snap-to-edge floating dot overlay with glowing pulsation indicators for streaming status (Yellow: Waiting, Green: Live, Red: Error).
 - 🎥 **Native Windows DirectShow / Media Foundation Driver**  
@@ -43,47 +43,59 @@
 | **Glass-to-Glass Latency** | **Ultra-Low (< 40 ms)** | ~100ms – 200ms | ~80ms – 150ms |
 | **Native DirectShow Driver** | **Yes (Native C++ DLL)** | Yes (Proprietary) | Yes (Proprietary) |
 | **Open Source** | **100% Free & Open Source (MIT)** | Closed Source | Closed Source |
-| **Screen Burn-in Protection (Blackout)** | **Yes (0.01f Backlight Overlay)** | Paid Feature | Not Available |
+| **Live Viewfinder & Screen Burn-in Protection** | **Yes (0.01f Backlight Overlay)** | Paid Feature | Not Available |
 | **Wi-Fi Auto-Discovery** | **Yes (UDP Beacon :8888)** | Partial | Yes |
 | **Ads / Resolution Limits** | **None (Full 1080p/4K Unlocked)** | HD Locked / Ads | Watermarked / Paid |
-| **Instant Aspect Switch** | **Yes (Zero-Disconnect)** | Requires Disconnect | Requires App Restart |
+| **Instant Aspect / Config Switch** | **Yes (Zero-Disconnect)** | Requires Disconnect | Requires App Restart |
 
 ---
 
 ## 📐 System Architecture
 
-```
- +-------------------------------------------------------------------------------+
- |                           ANDROID CLIENT (KOTLIN)                             |
- |                                                                               |
- | [ CameraX Pipeline ] ---> [ MediaCodec HEVC ] ---> [ Raw TCP Streamer :8554 ]  |
- |                                                                               |
- | [ ControlServer :8080 ] <--- REST API --- [ UDP Beacon Broadcaster :8888 ]    |
- +-------------------------------------|-----------------------------------------+
-                                       | TCP Video Stream / HTTP REST / UDP
-                                       v
- +-------------------------------------------------------------------------------+
- |                        WINDOWS NATIVE CLIENT (C++20)                          |
- |              ( https://github.com/dimalinau-lab/Virtual-Camera )              |
- |                                                                               |
- |  [ Socket Receiver ] ---> [ FFmpeg libavcodec ] ---> [ Fast Frame Rotator ]   |
- |                                                                               |
- |  [ WebView2 GUI ] <--- IPC ---> [ Shared Memory (Win32 MMF + Events) ]       |
- +-------------------------------------|-----------------------------------------+
-                                       |
-                                       v
- +-------------------------------------------------------------------------------+
- |                  NATIVE VIRTUAL CAMERA DRIVER (DIRECTSHOW / MF)               |
- |                                                                               |
- |  [ NativeMFVirtualCam.dll ] <--- Reads Shared Memory Frame Buffer             |
- +-------------------------------------|-----------------------------------------+
-                                       |
-                                       v
- +-------------------------------------------------------------------------------+
- |                            CONSUMING APPLICATIONS                             |
- |                                                                               |
- |  Discord  |  OBS Studio  |  Zoom  |  Telegram  |  WebRTC Browsers             |
- +-------------------------------------------------------------------------------+
+```text
+ +---------------------------------------------------------------------------------+
+ |                        ANDROID CLIENT (HARDWARE SOURCE)                         |
+ |              ( [https://github.com/dimalinau-lab/Virtual-Camera-Android](https://github.com/dimalinau-lab/Virtual-Camera-Android) )        |
+ |                                                                                 |
+ | [ CameraX Source ] ---> [ MediaCodec H.265 ]  ---> [ Raw TCP Server :8554 ]     |
+ | [ AudioRecord ]    ---> [ Raw 48kHz PCM ]     ---> [ Audio TCP Server :8555 ]   |
+ | [ NanoHTTPD :8080 ] <--- REST Commands ------- [ UDP Discovery Beacon :8888 ]   |
+ +----------------------------------------|----------------------------------------+
+                                          | TCP Video/Audio / HTTP REST / UDP Beacon
+                                          v
+ +---------------------------------------------------------------------------------+
+ |                        VIRTUALCAMNATIVE PC CLIENT (C++20)                       |
+ |                                                                                 |
+ |  [ TcpReceiver ]               [ AudioReceiver (WASAPI / VB-Cable) ]            |
+ |         │                                                                       |
+ |         ▼ (Anti-Bufferbloat Queue Guard)                                        |
+ |  [ NvdecDecoder (FFmpeg Low-Delay) ]                                            |
+ |         │                                                                       |
+ |         ▼                                                                       |
+ |  [ 64x64 Block Rotator ] ───► [ AVX2 NV12 Blender (60 FPS) ]                    |
+ |         │                                   │                                   |
+ |         ▼                                   ▼                                   |
+ |  [ Local MJPEG Preview :8000 ]     [ Win32 Shared Memory MMF ]                  |
+ |         │                                   │                                   |
+ |         ▼                                   │                                   |
+ |  [ WebView2 Desktop GUI ]                   │ Frame Buffer + Sync Events        |
+ +---------------------------------------------|-----------------------------------+
+                                               v
+ +---------------------------------------------------------------------------------+
+ |                NATIVE VIRTUAL DRIVERS (DIRECTSHOW & MEDIA FOUNDATION)           |
+ |                                                                                 |
+ |  [ NativeMFVirtualCam.dll ]                                                     |
+ |    ├── Video Capture Filter ("Native High-Speed Cam")                           |
+ |    └── Audio Capture Filter ("VirtualCam Native Microphone")                    |
+ +----------------------------------------|----------------------------------------+
+                                          | DirectShow Capture Pins
+                                          v
+ +---------------------------------------------------------------------------------+
+ |                              CONSUMING APPLICATIONS                             |
+ |                                                                                 |
+ |    Discord    |    OBS Studio    |    Zoom    |    Telegram    |    Browsers    |
+ +---------------------------------------------------------------------------------+
+
 ```
 
 ---
@@ -106,15 +118,15 @@
 
 ## 🌐 Control Server REST API
 
-The Android client runs an embedded HTTP REST server on port `8080` (`ControlServer`) to allow remote configuration and execution of hardware commands.
+The Android client runs an embedded HTTP REST server on port `8080` (`ControlServer`) to allow remote configuration and execution of hardware commands without socket resets.
 
 | Endpoint | Method | Request Payload / Params | Description |
 | :--- | :---: | :--- | :--- |
 | `/api/status` | `GET` | - | Returns JSON status: streaming state, camera facing, torch state, and orientation mode. |
-| `/api/connect` | `POST` | `{"mode": "usb" \| "wifi"}` | Triggers streaming pipeline initialization and requests an immediate H.265 I-Frame. |
-| `/api/disconnect` | `POST` | - | Safely stops video streamer and releases video encoding resources. |
-| `/api/config` | `POST` | `{"resolution": "1080p", "fps": 30, "bitrate": 7000000}` | Updates encoder resolution (`720p`, `1080p`, `4k`), FPS, and bitrate dynamically. |
-| `/api/action` | `POST` | `{"action": "switch_camera" \| "toggle_torch" \| "toggle_blackout"}` | Toggles front/back camera, torch LED, or screen blackout mode. |
+| `/api/connect` | `POST` | `{"mode": "usb" \| "wifi"}` | Wakes the stream encoder, requests an immediate H.265 I-Frame (IDR), and hooks up the PC socket. |
+| `/api/disconnect` | `POST` | - | Safely pauses the video streamer and drops the client socket (Camera continues running in background). |
+| `/api/config` | `POST` | `{"resolution": "1080p", "fps": 30, "bitrate": 7000000}` | Updates encoder resolution (`720p`, `1080p`, `4k`), FPS, and bitrate dynamically. Handles 300ms debouncing. |
+| `/api/action` | `POST` | `{"action": "switch_camera" \| "toggle_torch" \| "toggle_blackout" \| "toggle_mic_mute"}` | Toggles front/back camera, torch LED, screen blackout mode, or microphone mute. |
 | `/api/orientation` | `GET` / `POST` | `?mode=vertical \| horizontal` | Instantly switches frame orientation without dropping the TCP socket. |
 
 ### Example REST Request (Curl)

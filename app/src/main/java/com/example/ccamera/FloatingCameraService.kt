@@ -6,32 +6,31 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.util.Range
-import android.util.Size
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
 import android.view.WindowManager
-import androidx.camera.camera2.interop.Camera2Interop
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
-import androidx.camera.core.Camera
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -39,7 +38,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 
-@ExperimentalCamera2Interop
 class FloatingCameraService : Service(),
     LifecycleOwner,
     RawH265Streamer.StatusListener,
@@ -65,11 +63,18 @@ class FloatingCameraService : Service(),
 
     private var controlServer: ControlServer? = null
     private var streamer: RawH265Streamer? = null
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var boundCamera: Camera? = null
+    private var audioStreamer: AudioStreamer? = null
 
-    private var activeScreenPreview: Preview? = null
-    private var activeStreamPreview: Preview? = null
+    private var cameraDevice: CameraDevice? = null
+    private var cameraCaptureSession: CameraCaptureSession? = null
+    private var displaySurface: Surface? = null
+
+    private val cameraLock = Any()
+    @Volatile
+    private var isCameraBusy = false
+
+    @Volatile
+    private var isCameraInitialized = false
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -79,7 +84,6 @@ class FloatingCameraService : Service(),
     private var isBlackoutEnabled = false
     private var udpDiscoveryBroadcaster: UdpDiscoveryBroadcaster? = null
 
-    private var currentCameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
     private var currentCameraFacingName: String = "back"
     private var isTorchOn: Boolean = false
     private var isStreaming: Boolean = false
@@ -90,8 +94,28 @@ class FloatingCameraService : Service(),
     private var targetFps: Int = 30
     private var targetBitrate: Int = 7_000_000
 
-    private var externalSurfaceProvider: Preview.SurfaceProvider? = null
     private var isActivityInForeground = false
+    @Volatile
+    private var isSwitching = false
+
+    private var lastStreamConfigTime = 0L
+
+    private var cameraThread: HandlerThread? = null
+    private var cameraHandler: Handler? = null
+
+    private fun startBackgroundThread() {
+        if (cameraThread == null || cameraThread?.isAlive != true) {
+            val thread = HandlerThread("CameraBackgroundThread").apply { start() }
+            cameraThread = thread
+            cameraHandler = Handler(thread.looper)
+        }
+    }
+
+    @Synchronized
+    private fun getCameraHandler(): Handler {
+        startBackgroundThread()
+        return cameraHandler!!
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -128,8 +152,15 @@ class FloatingCameraService : Service(),
             return START_NOT_STICKY
         }
 
-        startCameraAndStreamerInternal()
+        startCameraOnce()
         return START_STICKY
+    }
+
+    fun startCameraOnce() {
+        if (isCameraInitialized) return
+        isCameraInitialized = true
+        Log.i("ROUTING_DEBUG", "startCameraOnce: единоразовый запуск камеры и кодека")
+        startCameraAndStreamerInternal()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -248,7 +279,12 @@ class FloatingCameraService : Service(),
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -392,9 +428,20 @@ class FloatingCameraService : Service(),
     }
 
     fun startCameraAndStreamerInternal() {
-        if (streamer == null) {
+        Log.i("ROUTING_DEBUG", "startCameraAndStreamerInternal: targetWidth=$targetWidth, targetHeight=$targetHeight, targetFps=$targetFps")
+        if (audioStreamer == null) {
             try {
-                streamer = RawH265Streamer(
+                audioStreamer = AudioStreamer(8555).apply {
+                    start()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Ошибка инициализации AudioStreamer", e)
+            }
+        }
+        var activeStreamer = streamer
+        if (activeStreamer == null) {
+            try {
+                activeStreamer = RawH265Streamer(
                     port = 8554,
                     width = targetWidth,
                     height = targetHeight,
@@ -404,23 +451,30 @@ class FloatingCameraService : Service(),
                 ).apply {
                     start()
                 }
+                streamer = activeStreamer
                 isStreaming = true
             } catch (e: Exception) {
                 Log.e(TAG, "Ошибка инициализации RawH265Streamer", e)
                 overlayController?.setStatus(OverlayController.Status.ERROR)
             }
+        } else {
+            if (activeStreamer.inputSurface == null || !activeStreamer.inputSurface!!.isValid) {
+                Log.i("ROUTING_DEBUG", "startCameraAndStreamerInternal: inputSurface равен null/невалиден, вызов reinitCodec")
+                activeStreamer.reinitCodec(targetWidth, targetHeight, targetFps, targetBitrate)
+            }
         }
-        bindCameraX()
+        bindCamera()
     }
 
     fun stopStreamingInternal() {
         isStreaming = false
+        isCameraInitialized = false
         try {
-            cameraProvider?.unbindAll()
+            audioStreamer?.stop()
         } catch (_: Exception) {}
-        boundCamera = null
-        activeScreenPreview = null
-        activeStreamPreview = null
+        audioStreamer = null
+
+        closeCameraSync()
 
         try {
             streamer?.stop()
@@ -431,158 +485,256 @@ class FloatingCameraService : Service(),
         overlayController?.setStatus(OverlayController.Status.WAITING)
     }
 
-    fun attachSurfaceProvider(surfaceProvider: Preview.SurfaceProvider) {
-        externalSurfaceProvider = surfaceProvider
-        isActivityInForeground = true
-        overlayController?.hideOverlay()
-        bindCameraX()
-    }
-
-    fun detachSurfaceProvider() {
-        externalSurfaceProvider = null
-        isActivityInForeground = false
-        if (isStreaming) {
+    fun setPreviewDisplaySurface(surface: Surface?) {
+        displaySurface = surface
+        isActivityInForeground = (surface != null && surface.isValid)
+        if (surface == null && isStreaming) {
             overlayController?.showOverlay()
+        } else if (surface != null) {
+            overlayController?.hideOverlay()
         }
-        bindCameraX()
+        Log.i("ROUTING_DEBUG", "setPreviewDisplaySurface: surface=$surface, isValid=${surface?.isValid}")
+
+        // Если камера уже открыта — безопасно обновляем сессию с новым экраном
+        val camera = cameraDevice ?: return
+        getCameraHandler().post {
+            startCamera2Session(camera)
+        }
     }
 
-    @ExperimentalCamera2Interop
-    private fun bindCameraX() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            try {
-                val provider = cameraProviderFuture.get()
-                cameraProvider = provider
-                provider.unbindAll()
+    fun setLocalPreviewSurface(surface: Surface?) {
+        setPreviewDisplaySurface(surface)
+    }
 
-                val rotation = if (currentOrientationMode == "horizontal") Surface.ROTATION_90 else Surface.ROTATION_0
+    fun updateSessionTargets() {
+        val camera = cameraDevice ?: return
+        getCameraHandler().post {
+            startCamera2Session(camera)
+        }
+    }
 
-                val resolutionSelector = ResolutionSelector.Builder()
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            Size(targetWidth, targetHeight),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                        )
-                    )
-                    .build()
+    fun closeCameraSync() {
+        Log.i("ROUTING_DEBUG", "closeCameraSync: закрытие сессии и устройства Camera2")
+        try {
+            cameraCaptureSession?.close()
+        } catch (_: Exception) {}
+        cameraCaptureSession = null
 
-                val useCases = ArrayList<Preview>()
+        try {
+            cameraDevice?.close()
+        } catch (_: Exception) {}
+        cameraDevice = null
+        isCameraBusy = false
+    }
 
-                // 1. Экранный Preview (для MainActivity)
-                val extProvider = externalSurfaceProvider
-                if (extProvider != null) {
-                    val screenPreview = Preview.Builder()
-                        .setTargetRotation(rotation)
-                        .build()
-                    screenPreview.setSurfaceProvider(extProvider)
-                    activeScreenPreview = screenPreview
-                    useCases.add(screenPreview)
-                } else {
-                    activeScreenPreview = null
+    private fun bindCamera() {
+        getCameraHandler().post {
+            synchronized(cameraLock) {
+                if (isCameraBusy) {
+                    Log.w("ROUTING_DEBUG", "Камера уже открывается/переключается, пропуск")
+                    return@post
                 }
-
-                // 2. Zero-Copy Preview под аппаратный Surface MediaCodec
-                val codecSurface = streamer?.inputSurface
-                if (codecSurface != null && codecSurface.isValid) {
-                    val streamPreviewBuilder = Preview.Builder()
-                        .setTargetRotation(rotation)
-                        .setResolutionSelector(resolutionSelector)
-
-                    val extBuilder = Camera2Interop.Extender(streamPreviewBuilder)
-                    extBuilder.setCaptureRequestOption(
-                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                        Range(targetFps, targetFps)
-                    )
-
-                    val streamPreview = streamPreviewBuilder.build()
-
-                    streamPreview.setSurfaceProvider { request ->
-                        val surface = streamer?.inputSurface
-                        if (surface != null && surface.isValid) {
-                            request.provideSurface(surface, ContextCompat.getMainExecutor(this)) {}
-                            streamer?.requestKeyFrame()
-                        } else {
-                            request.willNotProvideSurface()
-                        }
-                    }
-                    activeStreamPreview = streamPreview
-                    useCases.add(streamPreview)
-                } else {
-                    activeStreamPreview = null
-                }
-
-                if (useCases.isNotEmpty()) {
-                    try {
-                        boundCamera = provider.bindToLifecycle(this, currentCameraSelector, *useCases.toTypedArray())
-                        Log.i(TAG, "CameraX успешно привязана к Service (${useCases.size} use-cases, mode=$currentOrientationMode)")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Сбой совместной привязки use-cases, пробуем только streamPreview: ${e.message}")
-                        if (useCases.size > 1) {
-                            boundCamera = provider.bindToLifecycle(this, currentCameraSelector, useCases.last())
-                        }
-                    }
-                }
-
-                if (isTorchOn && currentCameraFacingName == "back") {
-                    boundCamera?.cameraControl?.enableTorch(true)
-                }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Ошибка привязки CameraX в сервисе", e)
-                overlayController?.setStatus(OverlayController.Status.ERROR)
+                isCameraBusy = true
             }
-        }, ContextCompat.getMainExecutor(this))
+
+            try {
+                closeCameraSync()
+
+                val activeStreamer = streamer ?: RawH265Streamer(
+                    port = 8554,
+                    width = targetWidth,
+                    height = targetHeight,
+                    bitRate = targetBitrate,
+                    frameRate = targetFps,
+                    listener = this
+                ).apply {
+                    start()
+                    streamer = this
+                    isStreaming = true
+                }
+
+                val codecSurf = activeStreamer.inputSurface
+                if (codecSurf == null || !codecSurf.isValid) {
+                    Log.e("ROUTING_DEBUG", "codecSurf невалиден в bindCamera")
+                    isCameraBusy = false
+                    return@post
+                }
+
+                val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                val targetLensFacing = if (currentCameraFacingName == "back") CameraCharacteristics.LENS_FACING_BACK else CameraCharacteristics.LENS_FACING_FRONT
+                var selectedCameraId: String? = null
+                for (id in manager.cameraIdList) {
+                    val chars = manager.getCameraCharacteristics(id)
+                    if (chars.get(CameraCharacteristics.LENS_FACING) == targetLensFacing) {
+                        if (selectedCameraId == null || (targetLensFacing == CameraCharacteristics.LENS_FACING_BACK && id == "0")) {
+                            selectedCameraId = id
+                        }
+                    }
+                }
+
+                if (selectedCameraId != null && ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    manager.openCamera(selectedCameraId, object : CameraDevice.StateCallback() {
+                        override fun onOpened(camera: CameraDevice) {
+                            Log.i("ROUTING_DEBUG", "Camera2 openCamera onOpened: id=${camera.id}")
+                            cameraDevice = camera
+                            isCameraBusy = false
+                            startCamera2Session(camera)
+                        }
+
+                        override fun onDisconnected(camera: CameraDevice) {
+                            Log.w("ROUTING_DEBUG", "Camera2 openCamera onDisconnected")
+                            closeCameraSync()
+                            isCameraBusy = false
+                        }
+
+                        override fun onError(camera: CameraDevice, error: Int) {
+                            Log.e("ROUTING_DEBUG", "Camera2 openCamera onError: $error")
+                            closeCameraSync()
+                            isCameraBusy = false
+                        }
+                    }, getCameraHandler())
+                } else {
+                    Log.e("ROUTING_DEBUG", "selectedCameraId null или нет разрешения CAMERA")
+                    isCameraBusy = false
+                }
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "Ошибка bindCamera Camera2: ", e)
+                isCameraBusy = false
+            }
+        }
+    }
+
+    private fun startCamera2Session(camera: CameraDevice) {
+        Log.i("ROUTING_DEBUG", "startCamera2Session: camera.id = ${camera.id}")
+        val codecSurface = streamer?.inputSurface ?: run {
+            Log.e("ROUTING_DEBUG", "ОШИБКА: codecSurface == null при сборке captureRequest")
+            return
+        }
+        if (!codecSurface.isValid) {
+            Log.e("ROUTING_DEBUG", "ОШИБКА: codecSurface невалиден при сборке captureRequest")
+            return
+        }
+
+        try {
+            val surfaces = mutableListOf<Surface>()
+            if (codecSurface.isValid) {
+                surfaces.add(codecSurface)
+            }
+
+            val dispSurf = displaySurface
+            if (dispSurf != null && dispSurf.isValid) {
+                surfaces.add(dispSurf)
+                Log.i("ROUTING_DEBUG", "Добавлена поверхность локального видоискателя ($dispSurf)")
+            } else {
+                Log.w("ROUTING_DEBUG", "displaySurface null или невалиден: $dispSurf")
+            }
+
+            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            for (s in surfaces) {
+                builder.addTarget(s)
+            }
+
+            val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val chars = manager.getCameraCharacteristics(camera.id)
+            val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
+
+            val selectedRange = if (targetFps >= 60 && maxSensorFps >= 60) {
+                availableFpsRanges?.firstOrNull { it.upper >= 60 } ?: Range(30, 60)
+            } else {
+                availableFpsRanges?.firstOrNull { it.upper == 30 && it.lower >= 15 } ?: Range(30, 30)
+            }
+
+            builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectedRange)
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+            builder.set(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
+            builder.set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_DEFAULT)
+            }
+
+            if (isTorchOn && currentCameraFacingName == "back") {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+            } else {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
+
+            @Suppress("DEPRECATION")
+            camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    cameraCaptureSession = session
+                    try {
+                        session.setRepeatingRequest(builder.build(), null, getCameraHandler())
+                        Log.i("ROUTING_DEBUG", "Сессия запущена с таргетами: surfaces.size = ${surfaces.size} (экран + кодек)")
+                        streamer?.requestSyncFrame()
+                    } catch (e: Exception) {
+                        Log.e("ROUTING_DEBUG", "Ошибка setRepeatingRequest: ", e)
+                    }
+                }
+
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    Log.e("ROUTING_DEBUG", "Ошибка конфигурации сессии")
+                }
+            }, getCameraHandler())
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "Ошибка создания Camera2 сессии: ", e)
+        }
     }
 
     private fun setOrientationInternal(mode: String) {
         val normalized = if (mode.contains("horiz") || mode.contains("land")) "horizontal" else "vertical"
-
         currentOrientationMode = normalized
-        val rotation = if (normalized == "horizontal") Surface.ROTATION_90 else Surface.ROTATION_0
-
-        try {
-            activeStreamPreview?.targetRotation = rotation
-            activeScreenPreview?.targetRotation = rotation
-            bindCameraX()
-            streamer?.requestKeyFrame()
-            Log.i(TAG, "Мгновенно обновлена ориентация кадра: $normalized (rotation=$rotation)")
-        } catch (e: Exception) {
-            Log.w(TAG, "Ошибка установки ориентации CameraX", e)
-            bindCameraX()
-        }
+        Log.i("ROUTING_DEBUG", "Ориентация установлена: $normalized")
     }
 
     // --- ControlServer.ControlCallback ---
 
     override fun onConnectRequested(mode: String) {
-        startCameraAndStreamerInternal()
+        Log.i("ROUTING_DEBUG", "onConnectRequested: клиент подключился")
+        isStreaming = true
+
+        // НЕ вызываем closeCameraSync() и openCamera()! Камера уже работает в фоне!
+        streamer?.resumeStreaming()
         streamer?.requestKeyFrame()
+
         updateNotification("Стриминг активен (ПК подключен)")
         overlayController?.setStatus(OverlayController.Status.STREAMING)
     }
 
     override fun onDisconnectRequested() {
-        stopStreamingInternal()
+        Log.i("ROUTING_DEBUG", "onDisconnectRequested")
+        streamer?.pauseStreaming()
+        updateNotification("Отключено по команде ПК")
+        overlayController?.setStatus(OverlayController.Status.WAITING)
     }
 
     override fun onActionRequested(action: String) {
+        Log.i("ROUTING_DEBUG", "onActionRequested: action=$action")
         ContextCompat.getMainExecutor(this).execute {
             when (action) {
                 "switch_camera" -> switchCamera()
                 "toggle_torch" -> toggleTorch()
                 "toggle_blackout" -> toggleBlackout()
+                "toggle_mic_mute" -> toggleMicMute()
             }
         }
     }
 
     override fun onOrientationRequested(mode: String) {
+        Log.i("ROUTING_DEBUG", "onOrientationRequested: mode=$mode")
         ContextCompat.getMainExecutor(this).execute {
             setOrientationInternal(mode)
         }
     }
 
     override fun onConfigUpdated(resolution: String, fps: Int, bitrate: Int) {
+        Log.i("ROUTING_DEBUG", "onConfigUpdated: resolution=$resolution, fps=$fps, bitrate=$bitrate")
         applyStreamConfig(resolution, fps, bitrate)
     }
 
@@ -591,11 +743,93 @@ class FloatingCameraService : Service(),
             isStreaming = isStreaming,
             cameraFacing = currentCameraFacingName,
             isTorchOn = isTorchOn,
-            orientation = currentOrientationMode
+            orientation = currentOrientationMode,
+            isMicMuted = audioStreamer?.isMuted ?: true
         )
     }
 
+    fun toggleMicMute(): Boolean {
+        val streamer = audioStreamer
+        return if (streamer != null) {
+            streamer.isMuted = !streamer.isMuted
+            Log.i(TAG, "Микрофон переключен: isMuted=${streamer.isMuted}")
+            streamer.isMuted
+        } else {
+            true
+        }
+    }
+
+    fun isMicMuted(): Boolean {
+        return audioStreamer?.isMuted ?: true
+    }
+
+    fun updateBitrateOnTheFly(newBitrate: Int) {
+        targetBitrate = newBitrate
+        streamer?.updateBitrate(newBitrate)
+        Log.i("ROUTING_DEBUG", "Битрейт обновлен на лету: $newBitrate bps")
+    }
+
+    fun updateFpsOnTheFly(newFps: Int) {
+        targetFps = newFps
+        Log.i("ROUTING_DEBUG", "updateFpsOnTheFly: $newFps")
+        val camera = cameraDevice
+        if (camera != null) {
+            startCamera2Session(camera)
+        } else {
+            bindCamera()
+        }
+    }
+
+    fun rebindResolutionOnly(newWidth: Int, newHeight: Int) {
+        Log.i("ROUTING_DEBUG", "rebindResolutionOnly: ${newWidth}x${newHeight}")
+        targetWidth = newWidth
+        targetHeight = newHeight
+        getCameraHandler().post {
+            try {
+                streamer?.pauseStreaming()
+                try {
+                    cameraCaptureSession?.close()
+                } catch (_: Exception) {}
+                cameraCaptureSession = null
+
+                val activeStreamer = streamer ?: RawH265Streamer(
+                    port = 8554,
+                    width = newWidth,
+                    height = newHeight,
+                    bitRate = targetBitrate,
+                    frameRate = targetFps,
+                    listener = this
+                ).apply {
+                    start()
+                    streamer = this
+                    isStreaming = true
+                }
+
+                val newSurface = activeStreamer.reinitCodec(newWidth, newHeight, targetFps, targetBitrate)
+                val camera = cameraDevice
+                if (camera != null && newSurface != null && newSurface.isValid) {
+                    startCamera2Session(camera)
+                } else {
+                    bindCamera()
+                }
+
+                streamer?.resumeStreaming()
+                streamer?.requestKeyFrame()
+                Log.i("ROUTING_DEBUG", "Разрешение успешно изменено на ${newWidth}x${newHeight}")
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "Ошибка смены разрешения: ", e)
+            }
+        }
+    }
+
     fun applyStreamConfig(resolution: String, fps: Int, bitrate: Int) {
+        val now = System.currentTimeMillis()
+        if (now - lastStreamConfigTime < 300) {
+            Log.w("ROUTING_DEBUG", "applyStreamConfig: пропуск быстрого повтора (дребезг ${now - lastStreamConfigTime}мс)")
+            return
+        }
+        lastStreamConfigTime = now
+
         val (newWidth, newHeight) = when (resolution.lowercase()) {
             "720p" -> Pair(1280, 720)
             "1080p" -> Pair(1920, 1080)
@@ -603,46 +837,53 @@ class FloatingCameraService : Service(),
             else -> Pair(1280, 720)
         }
 
-        val isResOrFpsChanged = (newWidth != targetWidth || newHeight != targetHeight || fps != targetFps)
+        val isResChanged = (newWidth != targetWidth || newHeight != targetHeight)
+        val isFpsChanged = (fps != targetFps)
+        val isBitrateChanged = (bitrate != targetBitrate)
 
-        targetWidth = newWidth
-        targetHeight = newHeight
-        targetFps = fps
+        Log.i("ROUTING_DEBUG", "applyStreamConfig: resolution=$resolution (${newWidth}x${newHeight}), fps=$fps, bitrate=$bitrate | isResChanged=$isResChanged, isFpsChanged=$isFpsChanged, isBitrateChanged=$isBitrateChanged")
 
-        if (isStreaming) {
-            if (!isResOrFpsChanged) {
-                targetBitrate = bitrate
-                streamer?.updateBitrate(bitrate)
-            } else {
-                targetBitrate = bitrate
-                stopStreamingInternal()
-                startCameraAndStreamerInternal()
+        if (!isResChanged && !isFpsChanged && isBitrateChanged) {
+            updateBitrateOnTheFly(bitrate)
+            return
+        }
+
+        if (!isResChanged && isFpsChanged) {
+            if (isBitrateChanged) {
+                updateBitrateOnTheFly(bitrate)
             }
-        } else {
+            updateFpsOnTheFly(fps)
+            return
+        }
+
+        if (isResChanged) {
             targetBitrate = bitrate
+            targetFps = fps
+            rebindResolutionOnly(newWidth, newHeight)
+            return
         }
     }
 
     private fun switchCamera() {
-        currentCameraSelector = if (currentCameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-            currentCameraFacingName = "front"
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            currentCameraFacingName = "back"
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
+        if (isSwitching) return
+
+        currentCameraFacingName = if (currentCameraFacingName == "back") "front" else "back"
 
         if (currentCameraFacingName == "front" && isTorchOn) {
             isTorchOn = false
         }
 
-        bindCameraX()
+        bindCamera()
     }
 
     private fun toggleTorch() {
-        if (currentCameraFacingName == "back") {
-            isTorchOn = !isTorchOn
-            boundCamera?.cameraControl?.enableTorch(isTorchOn)
+        if (currentCameraFacingName != "back") return
+        isTorchOn = !isTorchOn
+        Log.i("ROUTING_DEBUG", "toggleTorch: isTorchOn = $isTorchOn")
+
+        val camera = cameraDevice
+        if (camera != null) {
+            startCamera2Session(camera)
         }
     }
 
@@ -675,6 +916,10 @@ class FloatingCameraService : Service(),
         stopStreamingInternal()
         controlServer?.stop()
         controlServer = null
+
+        cameraThread?.quitSafely()
+        cameraThread = null
+        cameraHandler = null
 
         super.onDestroy()
         Log.i(TAG, "FloatingCameraService остановлен, камера и ресурсы полностью освобождены")
