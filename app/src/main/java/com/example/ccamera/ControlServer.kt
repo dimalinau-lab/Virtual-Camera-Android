@@ -1,12 +1,17 @@
 package com.example.ccamera
 
+import android.content.Context
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONObject
 import java.io.IOException
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 
 class ControlServer(
     port: Int = 8080,
+    private val context: Context,
     private val callback: ControlCallback
 ) : NanoHTTPD("0.0.0.0", port) {
 
@@ -17,6 +22,7 @@ class ControlServer(
         fun onOrientationRequested(mode: String) // "vertical" или "horizontal"
         fun onConfigUpdated(resolution: String, fps: Int, bitrate: Int)
         fun getStatus(): StatusInfo
+        fun onRequestUserPairing(clientId: String, clientName: String, onDecision: (Boolean) -> Unit)
     }
 
     data class StatusInfo(
@@ -62,10 +68,95 @@ class ControlServer(
             }
 
             when (uri) {
+                "/api/pair" -> {
+                    val clientId = jsonObj?.optString("client_id") ?: parms["client_id"]?.firstOrNull() ?: ""
+                    val clientName = jsonObj?.optString("client_name", "PC") ?: parms["client_name"]?.firstOrNull() ?: "PC"
+
+                    if (clientId.isBlank()) {
+                        return newJsonResponse(Response.Status.BAD_REQUEST, "{\"status\":\"error\",\"message\":\"Missing client_id\"}")
+                    }
+
+                    val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+
+                    if (prefs.contains(clientId)) {
+                        val token = prefs.getString(clientId, "") ?: ""
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"paired\",\"auth_token\":\"$token\"}"
+                        )
+                    }
+
+                    val decisionPromise = CompletableFuture<Boolean>()
+
+                    callback.onRequestUserPairing(clientId, clientName) { allowed ->
+                        decisionPromise.complete(allowed)
+                    }
+
+                    return try {
+                        val allowed = decisionPromise.get(20, TimeUnit.SECONDS)
+                        if (allowed) {
+                            val newToken = UUID.randomUUID().toString()
+                            prefs.edit().putString(clientId, newToken).apply()
+                            newJsonResponse(
+                                Response.Status.OK,
+                                "{\"status\":\"paired\",\"auth_token\":\"$newToken\"}"
+                            )
+                        } else {
+                            newJsonResponse(
+                                Response.Status.UNAUTHORIZED,
+                                "{\"status\":\"rejected\",\"message\":\"User rejected pairing\"}"
+                            )
+                        }
+                    } catch (_: Exception) {
+                        newJsonResponse(
+                            Response.Status.REQUEST_TIMEOUT,
+                            "{\"status\":\"timeout\",\"message\":\"Pairing timed out\"}"
+                        )
+                    }
+                }
                 "/api/connect" -> {
                     val mode = jsonObj?.optString("mode", "usb") ?: queryMode ?: "usb"
+                    val clientToken = jsonObj?.optString("auth_token", "") ?: parms["auth_token"]?.firstOrNull() ?: ""
+
+                    if (mode != "usb") {
+                        val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+                        val allTokens = prefs.all.values
+                        val isAuthorized = clientToken.isNotBlank() && allTokens.contains(clientToken)
+
+                        if (!isAuthorized) {
+                            Log.w("ROUTING_DEBUG", "Отказ подключения /api/connect: устройства нет в сопряженных или токен недействителен")
+                            return newJsonResponse(
+                                Response.Status.UNAUTHORIZED,
+                                "{\"status\":\"unauthorized\",\"message\":\"Device not paired or pairing revoked\"}"
+                            )
+                        }
+                    }
+
                     callback.onConnectRequested(mode)
-                    return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"message\":\"Connected\"}")
+                    return newJsonResponse(Response.Status.OK, "{\"status\":\"connected\"}")
+                }
+                "/api/unpair" -> {
+                    val tokenToRemove = jsonObj?.optString("token", "") ?: parms["token"]?.firstOrNull() ?: ""
+                    val clientIdToRemove = jsonObj?.optString("client_id", "") ?: parms["client_id"]?.firstOrNull() ?: ""
+
+                    val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+                    val editor = prefs.edit()
+
+                    if (clientIdToRemove.isNotBlank()) {
+                        editor.remove(clientIdToRemove)
+                    }
+
+                    if (tokenToRemove.isNotBlank()) {
+                        for ((key, value) in prefs.all) {
+                            if (value == tokenToRemove) {
+                                editor.remove(key)
+                            }
+                        }
+                    }
+
+                    editor.apply()
+                    Log.i("ROUTING_DEBUG", "Сопряжение успешно отозвано (/api/unpair)")
+                    return newJsonResponse(Response.Status.OK, "{\"status\":\"unpaired\"}")
                 }
                 "/api/disconnect" -> {
                     callback.onDisconnectRequested()

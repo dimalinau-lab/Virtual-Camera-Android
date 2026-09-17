@@ -1,5 +1,6 @@
 package com.example.ccamera
 
+import android.app.AlertDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -22,6 +23,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -129,7 +131,8 @@ class FloatingCameraService : Service(),
         startControlServer()
         startForegroundWithStatus("Ожидание подключения ПК...")
 
-        udpDiscoveryBroadcaster = UdpDiscoveryBroadcaster().apply {
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
+        udpDiscoveryBroadcaster = UdpBeaconBroadcaster(deviceId).apply {
             start()
         }
 
@@ -418,7 +421,7 @@ class FloatingCameraService : Service(),
     private fun startControlServer() {
         if (controlServer != null) return
         try {
-            controlServer = ControlServer(port = 8080, callback = this).apply {
+            controlServer = ControlServer(port = 8080, context = this, callback = this).apply {
                 start()
             }
             Log.i(TAG, "ControlServer запущен на порту 8080")
@@ -746,6 +749,32 @@ class FloatingCameraService : Service(),
             orientation = currentOrientationMode,
             isMicMuted = audioStreamer?.isMuted ?: true
         )
+    }
+
+    override fun onRequestUserPairing(clientId: String, clientName: String, onDecision: (Boolean) -> Unit) {
+        Log.i("ROUTING_DEBUG", "onRequestUserPairing: clientId=$clientId, clientName=$clientName")
+        Handler(Looper.getMainLooper()).post {
+            try {
+                if (Settings.canDrawOverlays(this)) {
+                    AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Запрос подключения")
+                        .setMessage("Компьютер \"$clientName\" запрашивает доступ к камере. Разрешить подключение?")
+                        .setCancelable(false)
+                        .setPositiveButton("Разрешить") { _, _ -> onDecision(true) }
+                        .setNegativeButton("Отклонить") { _, _ -> onDecision(false) }
+                        .create().apply {
+                            window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                            show()
+                        }
+                } else {
+                    Log.w("ROUTING_DEBUG", "Разрешение на оверлей отсутствует, авто-подтверждение сопряжения для $clientName")
+                    onDecision(true)
+                }
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "Ошибка отображения диалога сопряжения", e)
+                onDecision(true)
+            }
+        }
     }
 
     fun toggleMicMute(): Boolean {
