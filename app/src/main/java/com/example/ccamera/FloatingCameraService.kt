@@ -11,6 +11,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
+import org.json.JSONObject
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -90,6 +92,16 @@ class FloatingCameraService : Service(),
     private var isTorchOn: Boolean = false
     private var isStreaming: Boolean = false
     private var currentOrientationMode: String = "vertical"
+
+    @Volatile
+    private var currentZoomRatio: Float = 1.0f
+    @Volatile
+    private var currentLensName: String = "1x"
+    private var minZoomRatio: Float = 1.0f
+    private var maxZoomRatio: Float = 8.0f
+    private var zoomRatioRange: Range<Float>? = null
+    private var sensorCropRegion: Rect? = null
+    private var currentCaptureRequestBuilder: CaptureRequest.Builder? = null
 
     private var targetWidth: Int = 1280
     private var targetHeight: Int = 720
@@ -639,6 +651,19 @@ class FloatingCameraService : Service(),
 
             val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val chars = manager.getCameraCharacteristics(camera.id)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                zoomRatioRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                if (zoomRatioRange != null) {
+                    minZoomRatio = zoomRatioRange!!.lower
+                    maxZoomRatio = zoomRatioRange!!.upper
+                    Log.i("ROUTING_DEBUG", "Аппаратный диапазон зума (API 30+): [$minZoomRatio, $maxZoomRatio]")
+                }
+            }
+            sensorCropRegion = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            currentCaptureRequestBuilder = builder
+            applyZoomToBuilder(builder)
+
             val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
 
@@ -717,14 +742,78 @@ class FloatingCameraService : Service(),
         overlayController?.setStatus(OverlayController.Status.WAITING)
     }
 
-    override fun onActionRequested(action: String) {
-        Log.i("ROUTING_DEBUG", "onActionRequested: action=$action")
+    override fun onActionRequested(action: String, params: JSONObject) {
+        Log.i("ROUTING_DEBUG", "onActionRequested: action=$action, params=$params")
         ContextCompat.getMainExecutor(this).execute {
             when (action) {
                 "switch_camera" -> switchCamera()
                 "toggle_torch" -> toggleTorch()
                 "toggle_blackout" -> toggleBlackout()
                 "toggle_mic_mute" -> toggleMicMute()
+                "set_lens" -> {
+                    val lens = params.optString("lens", "1x")
+                    setLens(lens)
+                }
+                "set_zoom" -> {
+                    val ratio = params.optDouble("ratio", 1.0).toFloat()
+                    setZoomRatio(ratio)
+                }
+            }
+        }
+    }
+
+    private fun applyZoomToBuilder(builder: CaptureRequest.Builder) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && zoomRatioRange != null) {
+                val clamped = currentZoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, clamped)
+            } else {
+                sensorCropRegion?.let { activeArray ->
+                    val clamped = currentZoomRatio.coerceAtLeast(1.0f)
+                    val cropW = (activeArray.width() / clamped).toInt()
+                    val cropH = (activeArray.height() / clamped).toInt()
+                    val cropX = (activeArray.width() - cropW) / 2
+                    val cropY = (activeArray.height() - cropH) / 2
+                    builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropX, cropY, cropX + cropW, cropY + cropH))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "Ошибка применения зума в builder", e)
+        }
+    }
+
+    fun setZoomRatio(ratio: Float) {
+        val clamped = ratio.coerceIn(minZoomRatio, maxZoomRatio)
+        currentZoomRatio = clamped
+        Log.i("ROUTING_DEBUG", "Установка zoomRatio = $clamped (диапазон [$minZoomRatio, $maxZoomRatio])")
+        applyZoomToSession()
+    }
+
+    fun setLens(lens: String) {
+        currentLensName = lens
+        Log.i("ROUTING_DEBUG", "Запрос смены линзы: $lens")
+        val targetRatio = when (lens.lowercase()) {
+            "0.5x" -> {
+                if (minZoomRatio < 1.0f) minOf(0.5f, minZoomRatio) else 1.0f
+            }
+            "1x" -> 1.0f
+            "2x" -> minOf(2.0f, maxZoomRatio)
+            "3x" -> minOf(3.0f, maxZoomRatio)
+            else -> 1.0f
+        }
+        setZoomRatio(targetRatio)
+    }
+
+    private fun applyZoomToSession() {
+        val session = cameraCaptureSession ?: return
+        val builder = currentCaptureRequestBuilder ?: return
+        getCameraHandler().post {
+            try {
+                applyZoomToBuilder(builder)
+                session.setRepeatingRequest(builder.build(), null, getCameraHandler())
+                Log.i("ROUTING_DEBUG", "Зум успешно применен в активной сессии: ratio=$currentZoomRatio, lens=$currentLensName")
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "Ошибка applyZoomToSession: ", e)
             }
         }
     }
@@ -747,7 +836,11 @@ class FloatingCameraService : Service(),
             cameraFacing = currentCameraFacingName,
             isTorchOn = isTorchOn,
             orientation = currentOrientationMode,
-            isMicMuted = audioStreamer?.isMuted ?: true
+            isMicMuted = audioStreamer?.isMuted ?: false,
+            currentLens = currentLensName,
+            currentZoom = currentZoomRatio,
+            minZoom = minZoomRatio,
+            maxZoom = maxZoomRatio
         )
     }
 

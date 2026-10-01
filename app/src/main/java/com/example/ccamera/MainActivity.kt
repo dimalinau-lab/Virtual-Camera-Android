@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
             updateMuteButtonUI(isMuted)
         }
 
-        updateMuteButtonUI(true)
+        updateMuteButtonUI(cameraService?.isMicMuted() ?: false)
         checkAndRequestPermissions()
     }
 

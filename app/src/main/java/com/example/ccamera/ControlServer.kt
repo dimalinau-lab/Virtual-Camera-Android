@@ -18,7 +18,7 @@ class ControlServer(
     interface ControlCallback {
         fun onConnectRequested(mode: String) // "usb" или "wifi"
         fun onDisconnectRequested()
-        fun onActionRequested(action: String) // "switch_camera", "toggle_torch", "toggle_blackout", etc.
+        fun onActionRequested(action: String, params: JSONObject = JSONObject()) // "switch_camera", "set_lens", "set_zoom", "toggle_torch", etc.
         fun onOrientationRequested(mode: String) // "vertical" или "horizontal"
         fun onConfigUpdated(resolution: String, fps: Int, bitrate: Int)
         fun getStatus(): StatusInfo
@@ -30,7 +30,11 @@ class ControlServer(
         val cameraFacing: String,
         val isTorchOn: Boolean,
         val orientation: String = "vertical",
-        val isMicMuted: Boolean = false
+        val isMicMuted: Boolean = false,
+        val currentLens: String = "1x",
+        val currentZoom: Float = 1.0f,
+        val minZoom: Float = 1.0f,
+        val maxZoom: Float = 8.0f
     )
 
     companion object {
@@ -193,9 +197,12 @@ class ControlServer(
                         else if (postData.contains("switch_camera")) action = "switch_camera"
                         else if (postData.contains("toggle_torch")) action = "toggle_torch"
                         else if (postData.contains("toggle_mic_mute")) action = "toggle_mic_mute"
+                        else if (postData.contains("set_lens")) action = "set_lens"
+                        else if (postData.contains("set_zoom")) action = "set_zoom"
                     }
+                    val params = jsonObj ?: JSONObject()
                     if (action.isNotBlank()) {
-                        callback.onActionRequested(action)
+                        callback.onActionRequested(action, params)
                     }
                     if (action == "toggle_mic_mute") {
                         val status = callback.getStatus()
@@ -204,7 +211,42 @@ class ControlServer(
                             "{\"status\":\"ok\",\"action\":\"$action\",\"mic_muted\":${status.isMicMuted}}"
                         )
                     }
+                    if (action == "set_lens") {
+                        val status = callback.getStatus()
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"ok\",\"action\":\"$action\",\"lens\":\"${status.currentLens}\",\"zoom\":${status.currentZoom}}"
+                        )
+                    }
+                    if (action == "set_zoom") {
+                        val status = callback.getStatus()
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"ok\",\"action\":\"$action\",\"zoom\":${status.currentZoom}}"
+                        )
+                    }
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"action\":\"$action\"}")
+                }
+                "/api/lens" -> {
+                    val lens = jsonObj?.optString("lens") ?: parms["lens"]?.firstOrNull() ?: "1x"
+                    val p = JSONObject().apply { put("lens", lens) }
+                    callback.onActionRequested("set_lens", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"lens\":\"${status.currentLens}\",\"zoom\":${status.currentZoom}}"
+                    )
+                }
+                "/api/zoom" -> {
+                    val ratioStr = jsonObj?.optString("ratio") ?: parms["ratio"]?.firstOrNull() ?: "1.0"
+                    val ratio = ratioStr.toDoubleOrNull() ?: 1.0
+                    val p = JSONObject().apply { put("ratio", ratio) }
+                    callback.onActionRequested("set_zoom", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"zoom\":${status.currentZoom}}"
+                    )
                 }
                 "/api/status" -> {
                     val status = callback.getStatus()
@@ -215,6 +257,10 @@ class ControlServer(
                         put("torch", status.isTorchOn)
                         put("orientation", status.orientation)
                         put("mic_muted", status.isMicMuted)
+                        put("lens", status.currentLens)
+                        put("zoom", status.currentZoom)
+                        put("min_zoom", status.minZoom)
+                        put("max_zoom", status.maxZoom)
                     }.toString()
                     return newJsonResponse(Response.Status.OK, responseJson)
                 }

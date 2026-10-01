@@ -32,7 +32,9 @@ class AudioStreamer(
     private var outStream: OutputStream? = null
 
     @Volatile
-    var isMuted: Boolean = true
+    var isMuted: Boolean = false
+
+    private var lastMuteState = false
 
     private var audioRecord: AudioRecord? = null
 
@@ -124,9 +126,7 @@ class AudioStreamer(
                 while (isRunning.get() && isConnected.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     val bytesRead = record.read(buffer, 0, CHUNK_SIZE)
                     if (bytesRead > 0) {
-                        if (isMuted) {
-                            java.util.Arrays.fill(buffer, 0, bytesRead, 0.toByte())
-                        }
+                        applyMuteWithRamping(buffer, bytesRead, isMuted)
                         val stream = outStream
                         if (stream != null) {
                             try {
@@ -164,6 +164,44 @@ class AudioStreamer(
             Log.e(TAG, "Ошибка остановки AudioRecord", e)
         } finally {
             audioRecord = null
+        }
+    }
+
+    private fun applyMuteWithRamping(buffer: ByteArray, bytesRead: Int, muted: Boolean) {
+        val sampleCount = bytesRead / 2
+        if (muted) {
+            if (!lastMuteState) {
+                val rampSamples = minOf(64, sampleCount)
+                for (s in 0 until rampSamples) {
+                    val factor = 1.0f - (s.toFloat() / rampSamples)
+                    val idx = s * 2
+                    val sample = (buffer[idx].toInt() and 0xFF) or (buffer[idx + 1].toInt() shl 8)
+                    val shortSample = sample.toShort()
+                    val ramped = (shortSample * factor).toInt().coerceIn(-32768, 32767).toShort()
+                    buffer[idx] = (ramped.toInt() and 0xFF).toByte()
+                    buffer[idx + 1] = ((ramped.toInt() shr 8) and 0xFF).toByte()
+                }
+                if (bytesRead > rampSamples * 2) {
+                    java.util.Arrays.fill(buffer, rampSamples * 2, bytesRead, 0.toByte())
+                }
+                lastMuteState = true
+            } else {
+                java.util.Arrays.fill(buffer, 0, bytesRead, 0.toByte())
+            }
+        } else {
+            if (lastMuteState) {
+                val rampSamples = minOf(64, sampleCount)
+                for (s in 0 until rampSamples) {
+                    val factor = s.toFloat() / rampSamples
+                    val idx = s * 2
+                    val sample = (buffer[idx].toInt() and 0xFF) or (buffer[idx + 1].toInt() shl 8)
+                    val shortSample = sample.toShort()
+                    val ramped = (shortSample * factor).toInt().coerceIn(-32768, 32767).toShort()
+                    buffer[idx] = (ramped.toInt() and 0xFF).toByte()
+                    buffer[idx + 1] = ((ramped.toInt() shr 8) and 0xFF).toByte()
+                }
+                lastMuteState = false
+            }
         }
     }
 
