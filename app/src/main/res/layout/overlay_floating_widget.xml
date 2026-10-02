@@ -1,26 +1,165 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="40dp"
-    android:layout_height="40dp"
-    android:background="@android:color/transparent"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/overlayRoot"
+    android:layout_width="112dp"
+    android:layout_height="168dp"
+    android:clipToPadding="false"
     android:clickable="true"
     android:focusable="true">
 
-    <!-- Glowing / Pulsing Outer Ring -->
-    <View
-        android:id="@+id/pulseRing"
-        android:layout_width="26dp"
-        android:layout_height="26dp"
-        android:layout_gravity="center"
-        android:background="@drawable/bg_overlay_dot_ring"
-        android:visibility="gone" />
+    <!-- Card Container with Rounded Corners -->
+    <androidx.cardview.widget.CardView
+        android:id="@+id/overlayCard"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:cardCornerRadius="16dp"
+        app:cardElevation="10dp"
+        app:cardBackgroundColor="#0D0E15">
 
-    <!-- Core Status Dot -->
-    <View
-        android:id="@+id/statusDot"
-        android:layout_width="16dp"
-        android:layout_height="16dp"
-        android:layout_gravity="center"
-        android:background="@drawable/bg_overlay_dot_core" />
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
 
+            <!-- 1. Live Camera Preview TextureView -->
+            <TextureView
+                android:id="@+id/overlayTextureView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <!-- Translucent Acrylic Border Overlay -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_floating_card" />
+
+            <!-- 2. Status Badge (LIVE / FPS) Top Left -->
+            <LinearLayout
+                android:id="@+id/overlayStatusPill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|start"
+                android:layout_margin="6dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_pill_badge"
+                android:paddingHorizontal="6dp"
+                android:paddingVertical="2dp">
+
+                <View
+                    android:id="@+id/overlayStatusDot"
+                    android:layout_width="6dp"
+                    android:layout_height="6dp"
+                    android:layout_marginEnd="4dp"
+                    android:background="@drawable/bg_overlay_dot_core" />
+
+                <TextView
+                    android:id="@+id/overlayStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="LIVE"
+                    android:textColor="#FFFFFF"
+                    android:textSize="9sp"
+                    android:textStyle="bold" />
+
+                <ImageView
+                    android:id="@+id/overlayMicMutedBadge"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:layout_marginStart="4dp"
+                    android:src="@drawable/ic_mic_off"
+                    android:tint="#EF4444"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <!-- 3. Interactive Quick Actions Overlay (Appears on Tap) -->
+            <FrameLayout
+                android:id="@+id/overlayControls"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="#B3000000"
+                android:visibility="gone">
+
+                <!-- 2x2 Grid of Actions in the Center -->
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:orientation="vertical"
+                    android:gravity="center">
+
+                    <!-- Row 1: Flip Camera & Mute Mic -->
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginBottom="8dp">
+
+                        <ImageView
+                            android:id="@+id/btnOverlayFlip"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:layout_marginEnd="8dp"
+                            android:background="@drawable/bg_circle_action"
+                            android:padding="8dp"
+                            android:src="@drawable/ic_switch_camera"
+                            app:tint="#FFFFFF"
+                            android:contentDescription="Flip Camera" />
+
+                        <ImageView
+                            android:id="@+id/btnOverlayMute"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_circle_action"
+                            android:padding="8dp"
+                            android:src="@drawable/ic_mic"
+                            app:tint="#FFFFFF"
+                            android:contentDescription="Mute Microphone" />
+                    </LinearLayout>
+
+                    <!-- Row 2: Eco / Screen Blackout & Expand to App -->
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <ImageView
+                            android:id="@+id/btnOverlayEco"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:layout_marginEnd="8dp"
+                            android:background="@drawable/bg_circle_action"
+                            android:padding="8dp"
+                            android:src="@drawable/ic_eco"
+                            app:tint="#38BDF8"
+                            android:contentDescription="Eco Blackout" />
+
+                        <ImageView
+                            android:id="@+id/btnOverlayExpand"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_circle_action"
+                            android:padding="8dp"
+                            android:src="@drawable/ic_fullscreen"
+                            app:tint="#10B981"
+                            android:contentDescription="Expand" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Close / Stop Button at Bottom Right -->
+                <ImageView
+                    android:id="@+id/btnOverlayClose"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:layout_gravity="top|end"
+                    android:layout_margin="5dp"
+                    android:background="@drawable/bg_circle_action"
+                    android:padding="4dp"
+                    android:src="@drawable/ic_close_custom"
+                    app:tint="#EF4444"
+                    android:contentDescription="Close" />
+            </FrameLayout>
+
+        </FrameLayout>
+    </androidx.cardview.widget.CardView>
 </FrameLayout>

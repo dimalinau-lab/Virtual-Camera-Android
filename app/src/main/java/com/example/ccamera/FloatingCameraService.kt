@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
@@ -54,6 +56,8 @@ class FloatingCameraService : Service(),
 
         const val ACTION_STOP = "com.example.ccamera.ACTION_STOP"
         const val ACTION_STOP_SERVICE = "com.example.ccamera.ACTION_STOP_SERVICE"
+        const val ACTION_FLIP_CAMERA = "com.example.ccamera.ACTION_FLIP_CAMERA"
+        const val ACTION_TOGGLE_MIC = "com.example.ccamera.ACTION_TOGGLE_MIC"
     }
 
     private val lifecycleRegistry = LifecycleRegistry(this)
@@ -72,6 +76,8 @@ class FloatingCameraService : Service(),
     private var cameraDevice: CameraDevice? = null
     private var cameraCaptureSession: CameraCaptureSession? = null
     private var displaySurface: Surface? = null
+    private var activityDisplaySurface: Surface? = null
+    private var overlayDisplaySurface: Surface? = null
 
     private val cameraLock = Any()
     @Volatile
@@ -102,6 +108,26 @@ class FloatingCameraService : Service(),
     private var zoomRatioRange: Range<Float>? = null
     private var sensorCropRegion: Rect? = null
     private var currentCaptureRequestBuilder: CaptureRequest.Builder? = null
+
+    @Volatile
+    private var isManualExposure: Boolean = false
+    @Volatile
+    private var currentIso: Int = 400
+    @Volatile
+    private var currentExposureTimeNs: Long = 16_666_667L
+    private var minIso: Int = 100
+    private var maxIso: Int = 3200
+    private var minExposureNs: Long = 100_000L
+    private var maxExposureNs: Long = 100_000_000L
+
+    @Volatile
+    private var isManualFocus: Boolean = false
+    @Volatile
+    private var currentFocusDistance: Float = 0.0f
+    private var maxFocusDistance: Float = 10.0f
+
+    @Volatile
+    private var currentAwbMode: String = "auto"
 
     private var targetWidth: Int = 1280
     private var targetHeight: Int = 720
@@ -137,7 +163,54 @@ class FloatingCameraService : Service(),
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
 
-        overlayController = OverlayController(this)
+        overlayController = OverlayController(this, object : OverlayController.OverlayListener {
+            override fun onSurfaceAvailable(surface: Surface) {
+                Log.i("ROUTING_DEBUG", "Overlay surface available: $surface")
+                overlayDisplaySurface = surface
+                if (activityDisplaySurface == null) {
+                    displaySurface = surface
+                    updateSessionTargets()
+                }
+            }
+
+            override fun onSurfaceDestroyed() {
+                Log.i("ROUTING_DEBUG", "Overlay surface destroyed")
+                if (displaySurface == overlayDisplaySurface) {
+                    displaySurface = null
+                    updateSessionTargets()
+                }
+                overlayDisplaySurface = null
+            }
+
+            override fun onFlipCamera() {
+                switchCamera()
+            }
+
+            override fun onToggleMute(): Boolean {
+                val isMuted = toggleMicMute()
+                updateNotification(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+                return isMuted
+            }
+
+            override fun onExpandToApp() {
+                try {
+                    val intent = Intent(this@FloatingCameraService, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Ошибка перехода в полноэкранный режим", e)
+                }
+            }
+
+            override fun onToggleEco() {
+                toggleBlackout()
+            }
+
+            override fun onCloseService() {
+                stopServiceInternal()
+            }
+        })
 
         acquireLocks()
         startControlServer()
@@ -152,23 +225,42 @@ class FloatingCameraService : Service(),
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP_SERVICE || intent?.action == ACTION_STOP) {
-            Log.i(TAG, "Получен запрос на остановку сервиса через Intent")
-            disableBlackout()
-            overlayController?.hideOverlay()
-            udpDiscoveryBroadcaster?.stop()
-            udpDiscoveryBroadcaster = null
-            stopStreamingInternal()
-            controlServer?.stop()
-            controlServer = null
-            releaseLocks()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP_SERVICE, ACTION_STOP -> {
+                Log.i(TAG, "Получен запрос на остановку сервиса через Intent")
+                stopServiceInternal()
+                return START_NOT_STICKY
+            }
+            ACTION_FLIP_CAMERA -> {
+                Log.i(TAG, "Получен запрос смены камеры из Notification/PiP")
+                switchCamera()
+                return START_STICKY
+            }
+            ACTION_TOGGLE_MIC -> {
+                Log.i(TAG, "Получен запрос переключения микрофона из Notification/PiP")
+                val isMuted = toggleMicMute()
+                overlayController?.setMicMuted(isMuted)
+                updateNotification(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+                return START_STICKY
+            }
         }
 
         startCameraOnce()
         return START_STICKY
+    }
+
+    private fun stopServiceInternal() {
+        disableBlackout()
+        overlayController?.hideOverlay()
+        overlayController = null
+        udpDiscoveryBroadcaster?.stop()
+        udpDiscoveryBroadcaster = null
+        stopStreamingInternal()
+        controlServer?.stop()
+        controlServer = null
+        releaseLocks()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     fun startCameraOnce() {
@@ -181,22 +273,7 @@ class FloatingCameraService : Service(),
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
         Log.i(TAG, "Приложение смахнуто из недавних задач (onTaskRemoved), завершаем сервис и освобождаем камеру")
-
-        disableBlackout()
-        overlayController?.hideOverlay()
-        overlayController = null
-
-        udpDiscoveryBroadcaster?.stop()
-        udpDiscoveryBroadcaster = null
-
-        stopStreamingInternal()
-        controlServer?.stop()
-        controlServer = null
-
-        releaseLocks()
-
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopServiceInternal()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -256,15 +333,33 @@ class FloatingCameraService : Service(),
         manager.createNotificationChannel(channel)
     }
 
-    private fun startForegroundWithStatus(statusText: String) {
-        createNotificationChannel()
-
+    private fun buildNotificationBuilder(statusText: String): NotificationCompat.Builder {
         val pendingIntent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val flipIntent = Intent(this, FloatingCameraService::class.java).apply {
+            action = ACTION_FLIP_CAMERA
+        }
+        val flipPendingIntent = PendingIntent.getService(
+            this,
+            2,
+            flipIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val micIntent = Intent(this, FloatingCameraService::class.java).apply {
+            action = ACTION_TOGGLE_MIC
+        }
+        val micPendingIntent = PendingIntent.getService(
+            this,
+            3,
+            micIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -278,20 +373,26 @@ class FloatingCameraService : Service(),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val isMuted = audioStreamer?.isMuted ?: false
+        val micTitle = if (isMuted) "Вкл. микр." else "Выкл. микр."
+        val micIcon = if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("VirtualCam Native")
             .setContentText(statusText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "Остановить камеру",
-                stopPendingIntent
-            )
+            .addAction(R.drawable.ic_switch_camera, "Камера", flipPendingIntent)
+            .addAction(micIcon, micTitle, micPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Остановить", stopPendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
+    }
+
+    private fun startForegroundWithStatus(statusText: String) {
+        createNotificationChannel()
+        val notification = buildNotificationBuilder(statusText).build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             ServiceCompat.startForeground(
@@ -308,51 +409,19 @@ class FloatingCameraService : Service(),
     @Suppress("MissingPermission")
     private fun updateNotification(statusText: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val stopIntent = Intent(this, FloatingCameraService::class.java).apply {
-            action = ACTION_STOP_SERVICE
-        }
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            1,
-            stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("VirtualCam Native")
-            .setContentText(statusText)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pendingIntent)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "Остановить камеру",
-                stopPendingIntent
-            )
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-
+        val notification = buildNotificationBuilder(statusText).build()
         manager.notify(NOTIFICATION_ID, notification)
     }
 
     // --- Управление Blackout (затемнение экрана) ---
 
-    fun toggleBlackout() {
+    fun toggleBlackout(): Boolean {
         if (isBlackoutEnabled) {
             disableBlackout()
         } else {
             enableBlackout()
         }
+        return isBlackoutEnabled
     }
 
     private fun enableBlackout() {
@@ -501,14 +570,18 @@ class FloatingCameraService : Service(),
     }
 
     fun setPreviewDisplaySurface(surface: Surface?) {
-        displaySurface = surface
+        activityDisplaySurface = surface
         isActivityInForeground = (surface != null && surface.isValid)
-        if (surface == null && isStreaming) {
-            overlayController?.showOverlay()
-        } else if (surface != null) {
+        if (surface != null && surface.isValid) {
             overlayController?.hideOverlay()
+            displaySurface = surface
+        } else {
+            displaySurface = overlayDisplaySurface
+            if (isStreaming || isCameraInitialized) {
+                overlayController?.showOverlay()
+            }
         }
-        Log.i("ROUTING_DEBUG", "setPreviewDisplaySurface: surface=$surface, isValid=${surface?.isValid}")
+        Log.i("ROUTING_DEBUG", "setPreviewDisplaySurface: activitySurface=$surface, overlaySurface=$overlayDisplaySurface, displaySurface=$displaySurface")
 
         // Если камера уже открыта — безопасно обновляем сессию с новым экраном
         val camera = cameraDevice ?: return
@@ -661,8 +734,21 @@ class FloatingCameraService : Service(),
                 }
             }
             sensorCropRegion = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
+                minIso = it.lower
+                maxIso = it.upper
+            }
+            chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
+                minExposureNs = it.lower
+                maxExposureNs = it.upper
+            }
+            chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.let {
+                maxFocusDistance = it
+            }
+
             currentCaptureRequestBuilder = builder
             applyZoomToBuilder(builder)
+            applyManualControlsToBuilder(builder)
 
             val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
@@ -674,9 +760,7 @@ class FloatingCameraService : Service(),
             }
 
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectedRange)
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
             builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
@@ -758,6 +842,21 @@ class FloatingCameraService : Service(),
                     val ratio = params.optDouble("ratio", 1.0).toFloat()
                     setZoomRatio(ratio)
                 }
+                "set_manual_exposure" -> {
+                    val isManual = params.optBoolean("enabled", true)
+                    val iso = params.optInt("iso", currentIso)
+                    val expNs = params.optLong("exposure_time_ns", currentExposureTimeNs)
+                    setManualExposure(isManual, iso, expNs)
+                }
+                "set_manual_focus" -> {
+                    val isManual = params.optBoolean("enabled", true)
+                    val dist = params.optDouble("focus_distance", currentFocusDistance.toDouble()).toFloat()
+                    setManualFocus(isManual, dist)
+                }
+                "set_awb_mode" -> {
+                    val mode = params.optString("mode", "auto")
+                    setAwbMode(mode)
+                }
             }
         }
     }
@@ -818,6 +917,124 @@ class FloatingCameraService : Service(),
         }
     }
 
+    private fun applyManualControlsToBuilder(builder: CaptureRequest.Builder) {
+        try {
+            if (isManualExposure) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                builder.set(CaptureRequest.SENSOR_SENSITIVITY, currentIso.coerceIn(minIso, maxIso))
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentExposureTimeNs.coerceIn(minExposureNs, maxExposureNs))
+            } else {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            }
+
+            if (isManualFocus) {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, currentFocusDistance.coerceIn(0.0f, maxFocusDistance))
+            } else {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            }
+
+            when (currentAwbMode.lowercase()) {
+                "locked" -> {
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                    builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                }
+                "incandescent" -> {
+                    builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT)
+                }
+                "fluorescent" -> {
+                    builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT)
+                }
+                "daylight" -> {
+                    builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT)
+                }
+                "cloudy" -> {
+                    builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT)
+                }
+                else -> {
+                    builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "applyManualControlsToBuilder error", e)
+        }
+    }
+
+    fun setManualExposure(isManual: Boolean, iso: Int, exposureTimeNs: Long) {
+        isManualExposure = isManual
+        if (iso > 0) currentIso = iso.coerceIn(minIso, maxIso)
+        if (exposureTimeNs > 0) currentExposureTimeNs = exposureTimeNs.coerceIn(minExposureNs, maxExposureNs)
+        applyManualControlsToSession()
+    }
+
+    fun setManualFocus(isManual: Boolean, focusDistance: Float) {
+        isManualFocus = isManual
+        currentFocusDistance = focusDistance.coerceIn(0.0f, maxFocusDistance)
+        applyManualControlsToSession()
+    }
+
+    fun setAwbMode(mode: String) {
+        currentAwbMode = mode
+        applyManualControlsToSession()
+    }
+
+    private fun applyManualControlsToSession() {
+        val session = cameraCaptureSession ?: return
+        val builder = currentCaptureRequestBuilder ?: return
+        getCameraHandler().post {
+            try {
+                applyManualControlsToBuilder(builder)
+                session.setRepeatingRequest(builder.build(), null, getCameraHandler())
+                Log.i("ROUTING_DEBUG", "Manual controls applied: AE=$isManualExposure, ISO=$currentIso, expNs=$currentExposureTimeNs, AF=$isManualFocus, focusDist=$currentFocusDistance, awb=$currentAwbMode")
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "applyManualControlsToSession error: ", e)
+            }
+        }
+    }
+
+    private fun getBatteryInfo(): Triple<Int, Float, Boolean> {
+        try {
+            val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            val batteryStatus = registerReceiver(null, intentFilter)
+            if (batteryStatus != null) {
+                val level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                val pct = if (scale > 0) (level * 100 / scale) else level
+                val tempTenths = batteryStatus.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
+                val tempC = tempTenths / 10.0f
+                val status = batteryStatus.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                                 status == BatteryManager.BATTERY_STATUS_FULL
+                return Triple(pct, tempC, isCharging)
+            }
+        } catch (e: Exception) {
+            Log.w("ROUTING_DEBUG", "getBatteryInfo error", e)
+        }
+        return Triple(-1, -1.0f, false)
+    }
+
+    private fun getThermalStatusString(): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            return when (pm?.currentThermalStatus) {
+                PowerManager.THERMAL_STATUS_NONE -> "normal"
+                PowerManager.THERMAL_STATUS_LIGHT -> "light"
+                PowerManager.THERMAL_STATUS_MODERATE -> "moderate"
+                PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+                PowerManager.THERMAL_STATUS_CRITICAL -> "critical"
+                PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
+                PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
+                else -> "normal"
+            }
+        }
+        return "normal"
+    }
+
     override fun onOrientationRequested(mode: String) {
         Log.i("ROUTING_DEBUG", "onOrientationRequested: mode=$mode")
         ContextCompat.getMainExecutor(this).execute {
@@ -831,6 +1048,8 @@ class FloatingCameraService : Service(),
     }
 
     override fun getStatus(): ControlServer.StatusInfo {
+        val (batteryLvl, batteryTemp, isCharging) = getBatteryInfo()
+        val thermal = getThermalStatusString()
         return ControlServer.StatusInfo(
             isStreaming = isStreaming,
             cameraFacing = currentCameraFacingName,
@@ -840,7 +1059,22 @@ class FloatingCameraService : Service(),
             currentLens = currentLensName,
             currentZoom = currentZoomRatio,
             minZoom = minZoomRatio,
-            maxZoom = maxZoomRatio
+            maxZoom = maxZoomRatio,
+            batteryLevel = batteryLvl,
+            batteryTemp = batteryTemp,
+            isCharging = isCharging,
+            thermalStatus = thermal,
+            isManualExposure = isManualExposure,
+            iso = currentIso,
+            exposureTimeNs = currentExposureTimeNs,
+            minIso = minIso,
+            maxIso = maxIso,
+            minExposureNs = minExposureNs,
+            maxExposureNs = maxExposureNs,
+            isManualFocus = isManualFocus,
+            focusDistance = currentFocusDistance,
+            maxFocusDistance = maxFocusDistance,
+            awbMode = currentAwbMode
         )
     }
 
@@ -986,7 +1220,7 @@ class FloatingCameraService : Service(),
         }
     }
 
-    private fun switchCamera() {
+    fun switchCamera() {
         if (isSwitching) return
 
         currentCameraFacingName = if (currentCameraFacingName == "back") "front" else "back"
@@ -998,7 +1232,7 @@ class FloatingCameraService : Service(),
         bindCamera()
     }
 
-    private fun toggleTorch() {
+    fun toggleTorch() {
         if (currentCameraFacingName != "back") return
         isTorchOn = !isTorchOn
         Log.i("ROUTING_DEBUG", "toggleTorch: isTorchOn = $isTorchOn")
@@ -1009,9 +1243,46 @@ class FloatingCameraService : Service(),
         }
     }
 
+    interface ServiceStatusListener {
+        fun onStreamingStatusChanged(isStreaming: Boolean)
+    }
+
+    private val statusListeners = java.util.concurrent.CopyOnWriteArrayList<ServiceStatusListener>()
+
+    fun addStatusListener(listener: ServiceStatusListener) {
+        statusListeners.add(listener)
+        listener.onStreamingStatusChanged(isStreaming)
+    }
+
+    fun removeStatusListener(listener: ServiceStatusListener) {
+        statusListeners.remove(listener)
+    }
+
+    private fun notifyStatusChanged(streaming: Boolean) {
+        isStreaming = streaming
+        for (l in statusListeners) {
+            try { l.onStreamingStatusChanged(streaming) } catch (_: Exception) {}
+        }
+    }
+
+    fun showFloatingOverlay() {
+        overlayController?.showOverlay()
+    }
+
+    fun hideFloatingOverlay() {
+        overlayController?.hideOverlay()
+    }
+
+    fun isStreamingActive(): Boolean = isStreaming
+
+    fun isFrontCamera(): Boolean = (currentCameraFacingName == "front")
+
+    fun isBlackout(): Boolean = isBlackoutEnabled
+
     // --- RawH265Streamer.StatusListener ---
 
     override fun onStatusChanged(status: String, isConnected: Boolean) {
+        notifyStatusChanged(isConnected)
         if (isConnected) {
             updateNotification("Трансляция активна ($targetWidth x $targetHeight)")
             overlayController?.setStatus(OverlayController.Status.STREAMING)

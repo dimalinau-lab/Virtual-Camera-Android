@@ -40,6 +40,12 @@
   Captures 48 kHz 16-bit mono/stereo audio with hardware noise suppressor flags, transmitting raw PCM over a dedicated TCP stream directly to the Windows WASAPI / DirectShow audio filter.
 - 🛡️ **Foreground Service & Thread Safety**  
   Runs inside a dedicated Android `Foreground Service` protected by `PARTIAL_WAKE_LOCK` and `WIFI_MODE_FULL_HIGH_PERF`. All hardware lifecycle events execute safely on an isolated `HandlerThread` to prevent Main Thread blocks and HAL crashes.
+- 📱 **Samsung Flagships & Modern Cutout Safe Area Insets (v2.2.0)**  
+  Dynamically adapts to display punch-hole camera cutouts, curved screen edges, and status bars using `WindowInsetsCompat`. Specially calibrated for modern flagships including **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, and Pixel** devices so indicators never overlap with camera holes or One UI privacy dots.
+- 🪟 **Floating PIP & Multi-App Overlay Widget**  
+  Draggable, magnetic floating camera preview widget running smoothly above any other Android application, featuring one-tap mic mute, lens flip, and instant return to fullscreen.
+- 🌡️ **Real-Time Battery Thermal Guard**  
+  Monitors smartphone hardware battery temperature (`🌡️ 32°C`) directly in the header HUD and status badges, alerting when temperatures reach severe levels (`🔥 ПЕРЕГРЕВ` at >= 42°C).
 - 🔘 **Minimalist Floating Status Widget**  
   Includes a draggable, magnetic snap-to-edge floating dot overlay with glowing pulsation indicators for streaming status (Yellow: Waiting, Green: Live, Red: Error).
 
@@ -243,6 +249,12 @@ Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more informa
   Передача звука микрофона по отдельному TCP-порту `8555` с системным аппаратным шумоподавлением.
 - 📡 **Автоматическое обнаружение в сети (UDP Beacon :8888)**  
   Приложение транслирует широковещательный маяк раз в 1.5 секунды — ПК сам находит телефон без ручного ввода IP-адресов.
+- 📱 **Адаптация под флагманы Samsung и Safe Area Insets (v2.2.0)**  
+  Динамический расчет безопасных зон (`WindowInsetsCompat`) под вырезы камер (punch-hole), скругленные углы и системный статус-бар. Идеально откалибровано под последние 3 поколения **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra**, смартфоны Nothing, Pixel и Xiaomi — бейджи статуса «В ЭФИРЕ» и температуры больше не перекрываются индикатором приватности камеры One UI.
+- 🪟 **Плавающий оверлей и режим PiP (Картинка в картинке)**  
+  Возможность свернуть стример в компактный плавающий виджет поверх любых других приложений или стандартное системное окно PiP с быстрым переключением камеры и мутом микрофона.
+- 🌡️ **Термомониторинг и защита от перегрева**  
+  Отображение живой температуры аккумулятора (`🌡️ 32°C`) с автоматическим предупреждением о нагреве (`🔥 ПЕРЕГРЕВ` при >= 42°C).
 
 ---
 
@@ -308,6 +320,12 @@ cd Virtual-Camera-Android
   Окремий звуковий потік TCP `:8555` з використанням системного апаратного шумопоглинання.
 - 📡 **Автоматичне виявлення у мережі (UDP Beacon :8888)**  
   Додаток самостійно заявляє про себе у локальній мережі — ПК миттєво знаходить телефон без потреби вводити IP-адресу вручну.
+- 📱 **Оптимізація під флагмани Samsung та Safe Area Insets (v2.2.0)**  
+  Динамічний розрахунок безпечних зон (`WindowInsetsCompat`) для екранів з вирізами камер (punch-hole) та скругленими кутами дисплеїв **Samsung Galaxy S22, S23, S24, Ultra** та інших безрамкових пристроїв.
+- 🪟 **Плавучий оверлей-віджет та інтерактивний PiP**  
+  Можливість роботи поверх інших вікон із живим прев'ю, швидким вимкненням звуку та перемиканням камер.
+- 🌡️ **Термомоніторинг акумулятора**  
+  Відображення поточної температури батареї (`🌡️ 32°C`) та захист від перегріву смартфона під час тривалих стрімів.
 
 ---
 

@@ -34,7 +34,22 @@ class ControlServer(
         val currentLens: String = "1x",
         val currentZoom: Float = 1.0f,
         val minZoom: Float = 1.0f,
-        val maxZoom: Float = 8.0f
+        val maxZoom: Float = 8.0f,
+        val batteryLevel: Int = -1,
+        val batteryTemp: Float = -1.0f,
+        val isCharging: Boolean = false,
+        val thermalStatus: String = "normal",
+        val isManualExposure: Boolean = false,
+        val iso: Int = 400,
+        val exposureTimeNs: Long = 16_666_667L,
+        val minIso: Int = 100,
+        val maxIso: Int = 3200,
+        val minExposureNs: Long = 100_000L,
+        val maxExposureNs: Long = 100_000_000L,
+        val isManualFocus: Boolean = false,
+        val focusDistance: Float = 0.0f,
+        val maxFocusDistance: Float = 10.0f,
+        val awbMode: String = "auto"
     )
 
     companion object {
@@ -225,7 +240,41 @@ class ControlServer(
                             "{\"status\":\"ok\",\"action\":\"$action\",\"zoom\":${status.currentZoom}}"
                         )
                     }
+                    if (action == "set_manual_exposure" || action == "set_manual_focus" || action == "set_awb_mode") {
+                        val status = callback.getStatus()
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"ok\",\"action\":\"$action\",\"manual_exposure\":${status.isManualExposure},\"iso\":${status.iso},\"manual_focus\":${status.isManualFocus},\"focus_distance\":${status.focusDistance},\"awb_mode\":\"${status.awbMode}\"}"
+                        )
+                    }
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"action\":\"$action\"}")
+                }
+                "/api/manual_exposure" -> {
+                    val p = jsonObj ?: JSONObject()
+                    callback.onActionRequested("set_manual_exposure", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"manual_exposure\":${status.isManualExposure},\"iso\":${status.iso},\"exposure_time_ns\":${status.exposureTimeNs}}"
+                    )
+                }
+                "/api/manual_focus" -> {
+                    val p = jsonObj ?: JSONObject()
+                    callback.onActionRequested("set_manual_focus", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"manual_focus\":${status.isManualFocus},\"focus_distance\":${status.focusDistance}}"
+                    )
+                }
+                "/api/awb" -> {
+                    val p = jsonObj ?: JSONObject()
+                    callback.onActionRequested("set_awb_mode", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"awb_mode\":\"${status.awbMode}\"}"
+                    )
                 }
                 "/api/lens" -> {
                     val lens = jsonObj?.optString("lens") ?: parms["lens"]?.firstOrNull() ?: "1x"
@@ -261,6 +310,21 @@ class ControlServer(
                         put("zoom", status.currentZoom)
                         put("min_zoom", status.minZoom)
                         put("max_zoom", status.maxZoom)
+                        put("battery_level", status.batteryLevel)
+                        put("battery_temp", status.batteryTemp)
+                        put("is_charging", status.isCharging)
+                        put("thermal_status", status.thermalStatus)
+                        put("manual_exposure", status.isManualExposure)
+                        put("iso", status.iso)
+                        put("exposure_time_ns", status.exposureTimeNs)
+                        put("min_iso", status.minIso)
+                        put("max_iso", status.maxIso)
+                        put("min_exposure_ns", status.minExposureNs)
+                        put("max_exposure_ns", status.maxExposureNs)
+                        put("manual_focus", status.isManualFocus)
+                        put("focus_distance", status.focusDistance)
+                        put("max_focus_distance", status.maxFocusDistance)
+                        put("awb_mode", status.awbMode)
                     }.toString()
                     return newJsonResponse(Response.Status.OK, responseJson)
                 }
