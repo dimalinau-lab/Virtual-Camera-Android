@@ -754,12 +754,18 @@ class FloatingCameraService : Service(),
             val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
 
             val selectedRange = if (targetFps >= 60 && maxSensorFps >= 60) {
-                availableFpsRanges?.firstOrNull { it.upper >= 60 } ?: Range(30, 60)
+                availableFpsRanges?.firstOrNull { it.lower >= 60 && it.upper >= 60 }
+                    ?: availableFpsRanges?.firstOrNull { it.lower >= 30 && it.upper >= 60 }
+                    ?: availableFpsRanges?.firstOrNull { it.upper >= 60 }
+                    ?: Range(60, 60)
             } else {
-                availableFpsRanges?.firstOrNull { it.upper == 30 && it.lower >= 15 } ?: Range(30, 30)
+                availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
+                    ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
+                    ?: Range(30, 30)
             }
 
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CameraMetadata.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectedRange)
             builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)

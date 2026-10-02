@@ -57,6 +57,9 @@ class RawH265Streamer(
     private val codecExecutor = Executors.newSingleThreadExecutor()
 
     private val cachedCsdNals = ArrayList<ByteArray>()
+    private var reusableArrayBuffer = ByteArray(256 * 1024)
+    private val reusableStartIndices = ArrayList<Int>(16)
+    private val reusablePrefixLengths = ArrayList<Int>(16)
 
     fun start() {
         if (isRunning.getAndSet(true)) return
@@ -194,13 +197,13 @@ class RawH265Streamer(
                     try {
                         val socket = ss.accept()
                         socket.tcpNoDelay = true // Отключаем задержку Nagle для мгновенной отправки
-                        socket.sendBufferSize = 64 * 1024
+                        socket.sendBufferSize = 32 * 1024 // Минимальный буфер отправки против накопления задержки
 
                         var stream: DataOutputStream
                         synchronized(this) {
                             clientSocket?.close()
                             clientSocket = socket
-                            stream = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
+                            stream = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 16 * 1024))
                             dataOutputStream = stream
                             isConnected.set(true)
                         }
@@ -383,26 +386,32 @@ class RawH265Streamer(
     }
 
     private fun sendNalUnits(buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo, stream: DataOutputStream) {
-        val array = ByteArray(bufferInfo.size)
+        val size = bufferInfo.size
+        if (size <= 0) return
+
+        if (reusableArrayBuffer.size < size) {
+            reusableArrayBuffer = ByteArray(size * 2)
+        }
+        val array = reusableArrayBuffer
         val originalPos = buffer.position()
-        buffer.get(array, 0, bufferInfo.size)
+        buffer.get(array, 0, size)
         buffer.position(originalPos)
 
         var i = 0
-        val end = array.size
-        val startIndices = ArrayList<Int>()
-        val prefixLengths = ArrayList<Int>()
+        val end = size
+        reusableStartIndices.clear()
+        reusablePrefixLengths.clear()
 
         while (i <= end - 3) {
             if (array[i] == 0.toByte() && array[i + 1] == 0.toByte()) {
                 if (i <= end - 4 && array[i + 2] == 0.toByte() && array[i + 3] == 1.toByte()) {
-                    startIndices.add(i + 4)
-                    prefixLengths.add(4)
+                    reusableStartIndices.add(i + 4)
+                    reusablePrefixLengths.add(4)
                     i += 4
                     continue
                 } else if (array[i + 2] == 1.toByte()) {
-                    startIndices.add(i + 3)
-                    prefixLengths.add(3)
+                    reusableStartIndices.add(i + 3)
+                    reusablePrefixLengths.add(3)
                     i += 3
                     continue
                 }
@@ -410,19 +419,17 @@ class RawH265Streamer(
             i++
         }
 
-        if (startIndices.isEmpty()) {
-            if (array.isNotEmpty()) {
-                stream.writeInt(array.size)
-                stream.write(array)
-                stream.flush()
-            }
+        if (reusableStartIndices.isEmpty()) {
+            stream.writeInt(size)
+            stream.write(array, 0, size)
+            stream.flush()
             return
         }
 
-        for (k in 0 until startIndices.size) {
-            val nalStart = startIndices[k]
-            val nalEnd = if (k < startIndices.size - 1) {
-                startIndices[k + 1] - prefixLengths[k + 1]
+        for (k in 0 until reusableStartIndices.size) {
+            val nalStart = reusableStartIndices[k]
+            val nalEnd = if (k < reusableStartIndices.size - 1) {
+                reusableStartIndices[k + 1] - reusablePrefixLengths[k + 1]
             } else {
                 end
             }
