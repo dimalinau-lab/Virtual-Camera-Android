@@ -19,12 +19,27 @@
 
 ---
 
+## 🚀 What's New in v2.2.0
+
+- 📱 **Samsung Flagships & Display Cutout Safe Area Clearance**: Dynamically calculates punch-hole camera cutouts, curved display corners, and status bars using `WindowInsetsCompat`. Calibrated for **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone, and Pixel** devices so status badges ("В ЭФИРЕ", "32°C") never clip edges or collide with Samsung One UI green privacy camera dots.
+- 🪟 **Floating PIP & Multi-App Overlay Widget**: Glassmorphic preview card running smoothly over any Android application with magnetic snap-to-edge dragging, one-tap mic mute, lens flip, eco blackout, and fullscreen restoration.
+- 🌡️ **Real-Time Battery Thermal Guard**: Live hardware battery sensor temperature display (`🌡️ 32°C`) in header badges and telemetry JSON with severe overheating warnings (`🔥 ПЕРЕГРЕВ` at >= 42°C).
+- 🎚️ **Pro Camera Manual Controls via REST API**:
+  - `/api/manual_exposure`: Manual ISO control (100–3200) and exposure time in nanoseconds.
+  - `/api/manual_focus`: Continuous manual focal distance control (macro to infinity).
+  - `/api/awb`: Auto White Balance mode switching (auto, incandescent, fluorescent, daylight, cloudy, etc.).
+- 📦 **Pre-Built Release APK**: Ready-to-install binary `VirtualCam-v2.2.0.apk` included directly in repository root.
+
+---
+
 ## 🌟 Key Features
 
 - ⚡ **Ultra-Low Latency (< 30 ms Glass-to-Glass)**  
   Custom raw TCP transport layer (`TCP_NODELAY`, optimized 64 KB non-blocking socket buffers) paired with advanced `MediaCodec` low-latency tuning (`KEY_LOW_LATENCY`, `KEY_LATENCY=0`, Zero B-Frames, real-time thread priority, and max operating rate).
 - 🔍 **Multi-Lens Switching & Hardware Zoom**  
   Direct physical camera module selection: **0.5x Ultra-Wide**, **1x Wide**, and **2x / 3x Telephoto** via Camera2 `CONTROL_ZOOM_RATIO` and multi-camera physical sensor IDs.
+- 🎚️ **Pro Manual Camera Controls (v2.2.0)**  
+  Fine-grained control over exposure time, ISO sensitivity, manual focus distance, and Auto White Balance presets directly from the PC client without touching the phone.
 - 🛡️ **Secure Device Pairing & Auth Tokens**  
   Interactive system pairing via `/api/pair`: new PC clients trigger an `AlertDialog` prompt on the phone screen. Upon approval, a persistent UUID `auth_token` is generated and saved in `SharedPreferences`. Wi-Fi streaming enforces token verification on `/api/connect`, while USB ADB is natively trusted.
 - 🚀 **Hardware HEVC / H.265 Compression**  
@@ -42,9 +57,9 @@
   Runs inside a dedicated Android `Foreground Service` protected by `PARTIAL_WAKE_LOCK` and `WIFI_MODE_FULL_HIGH_PERF`. All hardware lifecycle events execute safely on an isolated `HandlerThread` to prevent Main Thread blocks and HAL crashes.
 - 📱 **Samsung Flagships & Modern Cutout Safe Area Insets (v2.2.0)**  
   Dynamically adapts to display punch-hole camera cutouts, curved screen edges, and status bars using `WindowInsetsCompat`. Specially calibrated for modern flagships including **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, and Pixel** devices so indicators never overlap with camera holes or One UI privacy dots.
-- 🪟 **Floating PIP & Multi-App Overlay Widget**  
-  Draggable, magnetic floating camera preview widget running smoothly above any other Android application, featuring one-tap mic mute, lens flip, and instant return to fullscreen.
-- 🌡️ **Real-Time Battery Thermal Guard**  
+- 🪟 **Floating PIP & Multi-App Overlay Widget (v2.2.0)**  
+  Draggable, magnetic floating camera preview widget running smoothly above any other Android application, featuring one-tap mic mute, lens flip, eco blackout, and instant return to fullscreen.
+- 🌡️ **Real-Time Battery Thermal Guard (v2.2.0)**  
   Monitors smartphone hardware battery temperature (`🌡️ 32°C`) directly in the header HUD and status badges, alerting when temperatures reach severe levels (`🔥 ПЕРЕГРЕВ` at >= 42°C).
 - 🔘 **Minimalist Floating Status Widget**  
   Includes a draggable, magnetic snap-to-edge floating dot overlay with glowing pulsation indicators for streaming status (Yellow: Waiting, Green: Live, Red: Error).
@@ -124,6 +139,10 @@
 
 ## 🚀 Quick Start
 
+### Installation
+- 📦 **Pre-Built APK (Fastest):** Download and install [`VirtualCam-v2.2.0.apk`](VirtualCam-v2.2.0.apk) directly on your device (also available in [Releases](https://github.com/dimalinau-lab/Virtual-Camera-Android/releases)).
+- 🛠️ **Build from Source:** See [Building from Source](#️-building-from-source).
+
 ### USB Mode (Lowest Latency & Maximum Stability)
 1. Enable **USB Debugging** on your phone (*Settings -> Developer Options -> USB Debugging*).
 2. Connect your phone to your PC via a USB cable.
@@ -147,13 +166,16 @@ The Android client runs an embedded HTTP REST server on port `8080` (`ControlSer
 | :--- | :---: | :--- | :--- |
 | `/api/pair` | `POST` | `{"client_id": "...", "client_name": "PC"}` | Requests client pairing. Displays an interactive `AlertDialog` prompt on the phone (20s timeout). Returns UUID `auth_token` on approval. |
 | `/api/unpair` | `POST` | `{"token": "...", "client_id": "..."}` | Revokes pairing for the specified client and removes the token from `SharedPreferences`. |
-| `/api/status` | `GET` | - | Returns JSON status: streaming state, camera facing, torch state, orientation mode, and mic mute status. |
+| `/api/status` | `GET` | - | Returns JSON status: streaming state, camera facing, torch, mic mute, battery level, battery temp (°C), thermal status, charging flag, manual ISO, exposure time ns, focus distance, and AWB mode. |
 | `/api/connect` | `POST` | `{"mode": "usb" \| "wifi", "auth_token": "..."}` | Validates `auth_token` for Wi-Fi connections (USB ADB is trusted). Wakes video encoder and requests an immediate IDR keyframe. |
 | `/api/disconnect` | `POST` | - | Safely pauses the video streamer and drops the client socket (Camera continues running in background). |
 | `/api/config` | `POST` | `{"resolution": "1080p", "fps": 60, "bitrate": 10000000}` | Updates encoder resolution (`720p`, `1080p`, `4k`), FPS, and bitrate dynamically with 300ms debouncing. |
 | `/api/action` | `POST` | `{"action": "switch_camera" \| "toggle_torch" \| "toggle_blackout" \| "toggle_mic_mute"}` | Toggles front/back camera, torch LED, screen blackout mode, or microphone mute. |
 | `/api/lens` | `GET` / `POST` | `?lens=0.5x \| 1x \| 2x` | Switches physical camera sensor optics on the smartphone live. |
 | `/api/orientation` | `GET` / `POST` | `?mode=vertical \| horizontal` | Instantly switches frame orientation without dropping the TCP socket. |
+| `/api/manual_exposure` | `POST` | `{"iso": 400, "exposure_time_ns": 16666667}` | Configures manual ISO sensitivity (100–3200) and shutter exposure time in nanoseconds. |
+| `/api/manual_focus` | `POST` | `{"focus_distance": 2.5}` | Configures manual optical focal distance (0.0 to max diopters). |
+| `/api/awb` | `POST` | `{"awb_mode": "auto" \| "daylight" \| "cloudy" \| ...}` | Selects Auto White Balance camera preset. |
 
 ### Example REST Requests (Curl)
 
@@ -233,12 +255,27 @@ Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more informa
 
 ---
 
+## 🚀 Что нового в версии v2.2.0
+
+- 📱 **Полная адаптация под флагманы Samsung и Safe Area Insets**: Динамический учет вырезов фронтальных камер (punch-hole), скруглений экранов и системного статус-бара через `WindowInsetsCompat`. Откалибровано под **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone и Pixel** — бейджи «В ЭФИРЕ» и температуры больше не перекрываются зеленым индикатором приватности камеры Samsung One UI.
+- 🪟 **Плавающий оверлей и режим поверх других окон (Floating Widget)**: Интерактивная плавающая карточка камеры поверх любого приложения с магнитным прилипанием к краям экрана, кнопками быстрого отключения микрофона, смены камеры, режима затемнения (Eco) и разворачивания на весь экран.
+- 🌡️ **Аппаратный термомониторинг аккумулятора**: Отображение реальной температуры батареи (`🌡️ 32°C`) в верхней панели и JSON-телеметрии с предупреждениями о критическом нагреве (`🔥 ПЕРЕГРЕВ` при >= 42°C).
+- 🎚️ **Ручное управление камерой (Pro Controls) через REST API**:
+  - `/api/manual_exposure`: Ручной выбор ISO (100–3200) и выдержки затвора в наносекундах.
+  - `/api/manual_focus`: Плавная установка дистанции фокусировки (от макро до бесконечности).
+  - `/api/awb`: Переключение режимов баланса белого (авто, дневной свет, лампа накаливания, облачно и др.).
+- 📦 **Готовый скомпилированный APK**: Файл `VirtualCam-v2.2.0.apk` добавлен прямо в корень репозитория для быстрой установки.
+
+---
+
 ## 🌟 Ключевые возможности
 
 - ⚡ **Сверхнизкая задержка (< 30 мс по USB и Wi-Fi 5 ГГц)**  
   Оптимизированный сокет TCP (`TCP_NODELAY`, буфер 64 КБ), тюнинг энкодера (`KEY_LOW_LATENCY`, нулевые B-кадры, максимальный приоритет потока).
 - 🔍 **Переключение физических линз камеры (0.5x / 1x / 2x)**  
   Прямой доступ к сверхширокоугольному, основному и телефото-объективам смартфона через аппаратный `CONTROL_ZOOM_RATIO`.
+- 🎚️ **Ручные настройки съемки Pro Manual (v2.2.0)**  
+  Дистанционное управление выдержкой, ISO, дистанцией фокусировки и балансом белого прямо из интерфейса ПК без необходимости трогать телефон.
 - 🛡️ **Безопасное сопряжение и токен авторизации**  
   При первой попытке подключения с нового ПК на экране телефона появляется системное диалоговое окно с подтверждением. Сгенерированный токен сохраняется в зашифрованных настройках.
 - 📱 **OLED Blackout — защита экрана от выгорания**  
@@ -251,14 +288,18 @@ Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more informa
   Приложение транслирует широковещательный маяк раз в 1.5 секунды — ПК сам находит телефон без ручного ввода IP-адресов.
 - 📱 **Адаптация под флагманы Samsung и Safe Area Insets (v2.2.0)**  
   Динамический расчет безопасных зон (`WindowInsetsCompat`) под вырезы камер (punch-hole), скругленные углы и системный статус-бар. Идеально откалибровано под последние 3 поколения **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra**, смартфоны Nothing, Pixel и Xiaomi — бейджи статуса «В ЭФИРЕ» и температуры больше не перекрываются индикатором приватности камеры One UI.
-- 🪟 **Плавающий оверлей и режим PiP (Картинка в картинке)**  
+- 🪟 **Плавающий оверлей и режим PiP (Картинка в картинке) (v2.2.0)**  
   Возможность свернуть стример в компактный плавающий виджет поверх любых других приложений или стандартное системное окно PiP с быстрым переключением камеры и мутом микрофона.
-- 🌡️ **Термомониторинг и защита от перегрева**  
+- 🌡️ **Термомониторинг и защита от перегрева (v2.2.0)**  
   Отображение живой температуры аккумулятора (`🌡️ 32°C`) с автоматическим предупреждением о нагреве (`🔥 ПЕРЕГРЕВ` при >= 42°C).
 
 ---
 
 ## 🚀 Быстрый старт
+
+### Способ установки
+- 📦 **Готовый APK (Рекомендуется):** Скачайте и установите файл [`VirtualCam-v2.2.0.apk`](VirtualCam-v2.2.0.apk) на смартфон (также доступен в [Releases](https://github.com/dimalinau-lab/Virtual-Camera-Android/releases)).
+- 🛠️ **Сборка из исходников:** Инструкция в разделе [Сборка APK из исходников](#️-сборка-apk-из-исходников).
 
 ### Режим USB (Минимальная задержка)
 1. Включите **Отладку по USB** (*Настройки -> Для разработчиков -> Отладка по USB*).
@@ -304,12 +345,27 @@ cd Virtual-Camera-Android
 
 ---
 
+## 🚀 Що нового у версії v2.2.0
+
+- 📱 **Безпечні зони Safe Area Insets для флагманів Samsung**: Динамічний розрахунок вирізів камер (punch-hole), скруглених країв дисплеїв та статус-бара через `WindowInsetsCompat`. Калібрування для **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone та Pixel** — інформаційні бейджі «В ЕФІРІ» та температури ніколи не обрізаються краями екрана й не перекриваються зеленою крапкою індикатора приватності Samsung One UI.
+- 🪟 **Плавучий оверлей-віджет та багатовіконний режим**: Інтерактивна плаваюча картка поверх будь-яких інших додатків із магнітним прилипанням до країв екрана, кнопками швидкого вимкнення мікрофона, зміни сенсорів камери, енергозбереження екрана (Eco) та повернення на весь екран.
+- 🌡️ **Апаратний термомоніторинг акумулятора**: Живе відображення температури батареї (`🌡️ 32°C`) у верхньому барі та JSON-телеметрії з автоматичним сповіщенням про критичний перегрів (`🔥 ПЕРЕГРІВ` при >= 42°C).
+- 🎚️ **Ручні налаштування зйомки Pro Manual через REST API**:
+  - `/api/manual_exposure`: Ручне налаштування чутливості ISO (100–3200) та витримки в наносекундах.
+  - `/api/manual_focus`: Плавне регулювання оптичного фокусу (від макро до нескінченності).
+  - `/api/awb`: Зміна режимів балансу білого (авто, сонячно, хмарно, лампи розжарювання тощо).
+- 📦 **Готовий скомпільований APK**: Файл `VirtualCam-v2.2.0.apk` доступний безпосередньо в кореневій теці репозиторію.
+
+---
+
 ## 🌟 Головні можливості
 
 - ⚡ **Наднизька затримка (< 30 мс через USB та Wi-Fi 5 ГГц)**  
   Оптимізований мережевий транспорт TCP (`TCP_NODELAY`, 64 КБ буфер), апаратний тюнінг низької затримки (`KEY_LOW_LATENCY`, відсутність B-кадрів).
 - 🔍 **Апаратне перемикання фізичних об'єктивів (0.5x / 1x / 2x)**  
   Пряме керування сенсорами смартфона: надширококутний, основний або телеоб'єктив через Camera2 `CONTROL_ZOOM_RATIO`.
+- 🎚️ **Професійні ручні параметри Pro Manual (v2.2.0)**  
+  Віддалене керування витримкою, ISO, фокусною відстанню та балансом білого прямо з клієнта на ПК без торкання екрана телефона.
 - 🛡️ **Безпечне сполучення та токени авторизації**  
   При спробі підключення нового комп'ютера на екрані телефона з'являється системний запит на доступ. Створений токен безпечно зберігається на пристрої.
 - 📱 **Захист екрана OLED Blackout**  
@@ -322,14 +378,18 @@ cd Virtual-Camera-Android
   Додаток самостійно заявляє про себе у локальній мережі — ПК миттєво знаходить телефон без потреби вводити IP-адресу вручну.
 - 📱 **Оптимізація під флагмани Samsung та Safe Area Insets (v2.2.0)**  
   Динамічний розрахунок безпечних зон (`WindowInsetsCompat`) для екранів з вирізами камер (punch-hole) та скругленими кутами дисплеїв **Samsung Galaxy S22, S23, S24, Ultra** та інших безрамкових пристроїв.
-- 🪟 **Плавучий оверлей-віджет та інтерактивний PiP**  
+- 🪟 **Плавучий оверлей-віджет та інтерактивний PiP (v2.2.0)**  
   Можливість роботи поверх інших вікон із живим прев'ю, швидким вимкненням звуку та перемиканням камер.
-- 🌡️ **Термомоніторинг акумулятора**  
+- 🌡️ **Термомоніторинг акумулятора (v2.2.0)**  
   Відображення поточної температури батареї (`🌡️ 32°C`) та захист від перегріву смартфона під час тривалих стрімів.
 
 ---
 
 ## 🚀 Швидкий старт
+
+### Спосіб встановлення
+- 📦 **Готовий APK (Рекомендовано):** Завантажте та встановіть файл [`VirtualCam-v2.2.0.apk`](VirtualCam-v2.2.0.apk) на смартфон (також доступний у [Releases](https://github.com/dimalinau-lab/Virtual-Camera-Android/releases)).
+- 🛠️ **Збирання з вихідного коду:** Інструкція у розділі [Збирання APK з вихідного коду](#️-збирання-apk-з-вихідного-коду).
 
 ### Підключення через USB (Рекомендовано)
 1. Увімкніть **Налагодження через USB** (*Налаштування -> Для розробників -> Налагодження через USB*).
