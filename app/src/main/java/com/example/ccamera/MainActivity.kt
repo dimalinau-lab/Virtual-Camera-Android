@@ -54,6 +54,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var gestureDetector: GestureDetector
+    private lateinit var updateManager: UpdateManager
+    private var availableUpdate: UpdateManager.UpdateInfo? = null
 
     private var cameraService: FloatingCameraService? = null
     private var isServiceBound = false
@@ -299,6 +301,19 @@ class MainActivity : AppCompatActivity() {
             updateMuteButtonUI(isMuted)
         }
 
+        // Автообновление приложения
+        updateManager = UpdateManager(this)
+        checkAppUpdates()
+
+        binding.btnDismissUpdate.setOnClickListener {
+            binding.updateBanner.visibility = View.GONE
+        }
+
+        binding.updateBanner.setOnClickListener {
+            val update = availableUpdate ?: return@setOnClickListener
+            startApkUpdate(update)
+        }
+
         val filter = IntentFilter().apply {
             addAction(PIP_ACTION_FLIP_CAMERA)
             addAction(PIP_ACTION_TOGGLE_MIC)
@@ -516,6 +531,50 @@ class MainActivity : AppCompatActivity() {
         val lp = window.attributes
         lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         window.attributes = lp
+    }
+
+    private fun checkAppUpdates() {
+        updateManager.checkForUpdate { info ->
+            if (info != null && info.hasUpdate) {
+                availableUpdate = info
+                val sizeStr = if (info.apkSize > 0) " (${formatSize(info.apkSize)})" else ""
+                binding.tvUpdateTitle.text = "✨ Доступно обновление v${info.latestVersion}"
+                binding.tvUpdateDesc.text = "Нажмите для загрузки и установки$sizeStr"
+                binding.updateBanner.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun startApkUpdate(update: UpdateManager.UpdateInfo) {
+        binding.updateProgressBar.visibility = View.VISIBLE
+        binding.updateProgressBar.progress = 0
+        binding.tvUpdateDesc.text = "Загрузка обновления..."
+        binding.updateBanner.isClickable = false
+
+        updateManager.downloadAndInstall(
+            update,
+            onProgress = { progress, downloaded, total ->
+                binding.updateProgressBar.progress = progress
+                val dlMb = (downloaded / (1024f * 1024f))
+                val totMb = (total / (1024f * 1024f))
+                binding.tvUpdateDesc.text = String.format("Загрузка: %d%% (%.1f / %.1f MB)", progress, dlMb, totMb)
+                if (progress >= 100) {
+                    binding.tvUpdateDesc.text = "Запуск установщика..."
+                }
+            },
+            onError = { error ->
+                binding.updateProgressBar.visibility = View.GONE
+                binding.tvUpdateDesc.text = "Ошибка: $error. Нажмите для повтора"
+                binding.updateBanner.isClickable = true
+                Toast.makeText(this, "Ошибка обновления: $error", Toast.LENGTH_LONG).show()
+            }
+        )
+    }
+
+    private fun formatSize(bytes: Long): String {
+        if (bytes <= 0) return ""
+        val mb = bytes / (1024f * 1024f)
+        return String.format("%.1f MB", mb)
     }
 
     override fun onDestroy() {

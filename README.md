@@ -21,6 +21,7 @@
 
 ## 🚀 What's New in v2.2.0
 
+- 🔄 **In-App Auto-Update System**: Automatically checks the GitHub Releases API on startup for newer versions (`UpdateManager`). Displays an animated notification card with a real-time download progress bar and invokes the native Android PackageInstaller via `FileProvider`.
 - 📱 **Samsung Flagships & Display Cutout Safe Area Clearance**: Dynamically calculates punch-hole camera cutouts, curved display corners, and status bars using `WindowInsetsCompat`. Calibrated for **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone, and Pixel** devices so status badges ("В ЭФИРЕ", "32°C") never clip edges or collide with Samsung One UI green privacy camera dots.
 - 🪟 **Floating PIP & Multi-App Overlay Widget**: Glassmorphic preview card running smoothly over any Android application with magnetic snap-to-edge dragging, one-tap mic mute, lens flip, eco blackout, and fullscreen restoration.
 - 🌡️ **Real-Time Battery Thermal Guard**: Live hardware battery sensor temperature display (`🌡️ 32°C`) in header badges and telemetry JSON with severe overheating warnings (`🔥 ПЕРЕГРЕВ` at >= 42°C).
@@ -257,6 +258,7 @@ Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more informa
 
 ## 🚀 Что нового в версии v2.2.0
 
+- 🔄 **Встроенная система автообновления**: Автоматическая проверка новых релизов через GitHub Releases API при старте (`UpdateManager`). Анимированный баннер с индикатором прогресса загрузки и бесшовная установка APK в один тап через `FileProvider` и системный установщик Android.
 - 📱 **Полная адаптация под флагманы Samsung и Safe Area Insets**: Динамический учет вырезов фронтальных камер (punch-hole), скруглений экранов и системного статус-бара через `WindowInsetsCompat`. Откалибровано под **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone и Pixel** — бейджи «В ЭФИРЕ» и температуры больше не перекрываются зеленым индикатором приватности камеры Samsung One UI.
 - 🪟 **Плавающий оверлей и режим поверх других окон (Floating Widget)**: Интерактивная плавающая карточка камеры поверх любого приложения с магнитным прилипанием к краям экрана, кнопками быстрого отключения микрофона, смены камеры, режима затемнения (Eco) и разворачивания на весь экран.
 - 🌡️ **Аппаратный термомониторинг аккумулятора**: Отображение реальной температуры батареи (`🌡️ 32°C`) в верхней панели и JSON-телеметрии с предупреждениями о критическом нагреве (`🔥 ПЕРЕГРЕВ` при >= 42°C).
@@ -347,6 +349,7 @@ cd Virtual-Camera-Android
 
 ## 🚀 Що нового у версії v2.2.0
 
+- 🔄 **Вбудована система автооновлення**: Автоматична перевірка нових версій через GitHub Releases API при запуску (`UpdateManager`). Анімований банер з індикатором прогресу завантаження та безшовне встановлення APK в один дотик через `FileProvider` і системний інсталятор Android.
 - 📱 **Безпечні зони Safe Area Insets для флагманів Samsung**: Динамічний розрахунок вирізів камер (punch-hole), скруглених країв дисплеїв та статус-бара через `WindowInsetsCompat`. Калібрування для **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone та Pixel** — інформаційні бейджі «В ЕФІРІ» та температури ніколи не обрізаються краями екрана й не перекриваються зеленою крапкою індикатора приватності Samsung One UI.
 - 🪟 **Плавучий оверлей-віджет та багатовіконний режим**: Інтерактивна плаваюча картка поверх будь-яких інших додатків із магнітним прилипанням до країв екрана, кнопками швидкого вимкнення мікрофона, зміни сенсорів камери, енергозбереження екрана (Eco) та повернення на весь екран.
 - 🌡️ **Апаратний термомоніторинг акумулятора**: Живе відображення температури батареї (`🌡️ 32°C`) у верхньому барі та JSON-телеметрії з автоматичним сповіщенням про критичний перегрів (`🔥 ПЕРЕГРІВ` при >= 42°C).
