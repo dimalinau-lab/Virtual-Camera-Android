@@ -60,6 +60,45 @@ class MainActivity : AppCompatActivity() {
     private var cameraService: FloatingCameraService? = null
     private var isServiceBound = false
 
+    private var isZenUiHidden = false
+    private val zenHideHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val zenHideRunnable = Runnable {
+        hideZenUi()
+    }
+
+    private fun toggleZenUi() {
+        if (isZenUiHidden) {
+            showZenUi()
+        } else {
+            hideZenUi()
+        }
+    }
+
+    private fun showZenUi() {
+        isZenUiHidden = false
+        binding.topBarLayout.animate().alpha(1f).setDuration(250).withStartAction {
+            binding.topBarLayout.visibility = View.VISIBLE
+        }.start()
+        binding.bottomActionBar.animate().alpha(1f).setDuration(250).withStartAction {
+            binding.bottomActionBar.visibility = View.VISIBLE
+        }.start()
+
+        zenHideHandler.removeCallbacks(zenHideRunnable)
+        if (cameraService?.isStreamingActive() == true) {
+            zenHideHandler.postDelayed(zenHideRunnable, 3500)
+        }
+    }
+
+    private fun hideZenUi() {
+        isZenUiHidden = true
+        binding.topBarLayout.animate().alpha(0f).setDuration(300).withEndAction {
+            binding.topBarLayout.visibility = View.INVISIBLE
+        }.start()
+        binding.bottomActionBar.animate().alpha(0f).setDuration(300).withEndAction {
+            binding.bottomActionBar.visibility = View.INVISIBLE
+        }.start()
+    }
+
     private val statusListener = object : FloatingCameraService.ServiceStatusListener {
         override fun onStreamingStatusChanged(isStreaming: Boolean) {
             runOnUiThread {
@@ -253,6 +292,28 @@ class MainActivity : AppCompatActivity() {
             windowInsets
         }
 
+        // 1.5. Быстрый жест: двойной тап для переворота камеры и одинарный тап для Zen Mode
+        val previewGestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                cameraService?.switchCamera()
+                Toast.makeText(this@MainActivity, "📷 Камера переключена", Toast.LENGTH_SHORT).show()
+                return true
+            }
+
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                toggleZenUi()
+                return true
+            }
+        })
+
+        binding.viewFinder.setOnTouchListener { v, event ->
+            previewGestureDetector.onTouchEvent(event)
+            if (event.action == MotionEvent.ACTION_UP) {
+                v.performClick()
+            }
+            true
+        }
+
         // 2. Выход из блэкаута по двойному тапу
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -346,9 +407,14 @@ class MainActivity : AppCompatActivity() {
         if (isStreaming) {
             binding.statusText.text = "В ЭФИРЕ"
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
+            // Zen Mode: автоскрытие рамок управления через 3 секунды после начала стрима
+            zenHideHandler.removeCallbacks(zenHideRunnable)
+            zenHideHandler.postDelayed(zenHideRunnable, 3000)
         } else {
             binding.statusText.text = "ОЖИДАНИЕ ПК"
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FFC107"))
+            zenHideHandler.removeCallbacks(zenHideRunnable)
+            showZenUi()
         }
     }
 

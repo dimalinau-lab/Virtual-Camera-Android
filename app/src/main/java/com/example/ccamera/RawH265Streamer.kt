@@ -12,7 +12,9 @@ import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class RawH265Streamer(
@@ -55,17 +57,18 @@ class RawH265Streamer(
 
     private val serverExecutor = Executors.newSingleThreadExecutor()
     private val codecExecutor = Executors.newSingleThreadExecutor()
+    private val networkExecutor = Executors.newSingleThreadExecutor()
+    private val frameQueue = ArrayBlockingQueue<ByteArray>(4)
 
-    private val cachedCsdNals = ArrayList<ByteArray>()
+    private var cachedCsdBuffer: ByteArray? = null
     private var reusableArrayBuffer = ByteArray(256 * 1024)
-    private val reusableStartIndices = ArrayList<Int>(16)
-    private val reusablePrefixLengths = ArrayList<Int>(16)
 
     fun start() {
         if (isRunning.getAndSet(true)) return
 
         initMediaCodec()
         startServerSocket()
+        startNetworkSender()
         startCodecLoop()
     }
 
@@ -114,6 +117,7 @@ class RawH265Streamer(
             dataOutputStream = null
             clientSocket = null
             isConnected.set(false)
+            frameQueue.clear()
         }
         if (isRunning.get()) {
             listener?.onStatusChanged("Ожидание подключения C++ клиента...", false)
@@ -148,6 +152,10 @@ class RawH265Streamer(
                 setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
                 setInteger(MediaFormat.KEY_CAPTURE_RATE, frameRate)
                 
+                // Cyclic Intra Refresh (равномерный битрейт без забивания сети резкими I-кадрами)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, frameRate)
+                }
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Ключевой кадр каждую секунду
 
                 // Ультра-низкая задержка (Ultra Low-Latency):
@@ -174,8 +182,8 @@ class RawH265Streamer(
             codec.start()
             mediaCodec = codec
 
-            synchronized(cachedCsdNals) {
-                cachedCsdNals.clear()
+            synchronized(this) {
+                cachedCsdBuffer = null
             }
             Log.i(TAG, "MediaCodec Surface готов ($width x $height @ $frameRate fps, CBR, repeatFrameAfter=${repeatFrameUs}us)")
         } catch (e: Exception) {
@@ -197,26 +205,26 @@ class RawH265Streamer(
                     try {
                         val socket = ss.accept()
                         socket.tcpNoDelay = true // Отключаем задержку Nagle для мгновенной отправки
-                        socket.sendBufferSize = 32 * 1024 // Минимальный буфер отправки против накопления задержки
+                        socket.sendBufferSize = 512 * 1024 // 512 КБ буфер сокета для сглаживания всплесков I-кадров
 
                         var stream: DataOutputStream
                         synchronized(this) {
                             clientSocket?.close()
                             clientSocket = socket
-                            stream = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 16 * 1024))
+                            stream = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
                             dataOutputStream = stream
                             isConnected.set(true)
                         }
 
                         listener?.onStatusChanged("Стриминг активен", true)
 
-                        // 1. Отправляем кэшированные CSD NALU (VPS/SPS/PPS)
-                        synchronized(cachedCsdNals) {
-                            for (nal in cachedCsdNals) {
-                                stream.writeInt(nal.size)
-                                stream.write(nal)
+                        // 1. Отправляем кэшированный CSD (VPS/SPS/PPS) целиком единым пакетом
+                        synchronized(this) {
+                            cachedCsdBuffer?.let { csd ->
+                                stream.writeInt(csd.size)
+                                stream.write(csd)
+                                stream.flush()
                             }
-                            stream.flush()
                         }
 
                         // 2. Немедленно запрашиваем ключевой кадр (IDR / Key-frame) для нового клиента
@@ -259,6 +267,28 @@ class RawH265Streamer(
         }
     }
 
+    private fun startNetworkSender() {
+        networkExecutor.execute {
+            Log.i(TAG, "Асинхронный поток отправки NALU (NetworkSender) запущен")
+            while (isRunning.get()) {
+                try {
+                    val frame = frameQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
+                    if (!isConnected.get() || isPaused) continue
+
+                    val stream = dataOutputStream ?: continue
+                    stream.writeInt(frame.size)
+                    stream.write(frame)
+                    stream.flush()
+                } catch (e: Exception) {
+                    if (isRunning.get() && isConnected.get()) {
+                        Log.e(TAG, "Ошибка передачи пакета по сети", e)
+                        disconnectClient()
+                    }
+                }
+            }
+        }
+    }
+
     private fun startCodecLoop() {
         codecExecutor.execute {
             val bufferInfo = MediaCodec.BufferInfo()
@@ -276,7 +306,7 @@ class RawH265Streamer(
                 }
 
                 try {
-                    val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
+                    val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 2_000L)
                     if (outputBufferIndex >= 0) {
                         val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
                         if (outputBuffer != null && bufferInfo.size > 0) {
@@ -303,19 +333,21 @@ class RawH265Streamer(
 
                             val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                             if (isCodecConfig) {
-                                cacheCsdNals(outputBuffer, bufferInfo)
+                                cacheCsdBuffer(outputBuffer, bufferInfo)
                             }
 
-                            if (isConnected.get() && !isPaused) {
-                                synchronized(this) {
-                                    val stream = dataOutputStream
-                                    if (stream != null) {
-                                        try {
-                                            sendNalUnits(outputBuffer, bufferInfo, stream)
-                                        } catch (e: Exception) {
-                                            disconnectClient()
-                                        }
-                                    }
+                            if (isConnected.get() && !isPaused && bufferInfo.size > 0) {
+                                val size = bufferInfo.size
+                                val frameBytes = ByteArray(size)
+                                val originalPos = outputBuffer.position()
+                                outputBuffer.get(frameBytes, 0, size)
+                                outputBuffer.position(originalPos)
+
+                                // Если Wi-Fi временно перегружен (очередь 4 кадра заполнена), сбрасываем старый кадр и просим чистый IDR
+                                if (!frameQueue.offer(frameBytes)) {
+                                    frameQueue.poll()
+                                    frameQueue.offer(frameBytes)
+                                    requestKeyFrame()
                                 }
                             }
                         }
@@ -326,120 +358,16 @@ class RawH265Streamer(
         }
     }
 
-    private fun cacheCsdNals(buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
-        val nals = extractNalUnits(buffer, bufferInfo)
-        synchronized(cachedCsdNals) {
-            cachedCsdNals.clear()
-            cachedCsdNals.addAll(nals)
-        }
-    }
-
-    private fun extractNalUnits(buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo): List<ByteArray> {
-        val result = ArrayList<ByteArray>()
-        val array = ByteArray(bufferInfo.size)
-        val originalPos = buffer.position()
-        buffer.get(array, 0, bufferInfo.size)
-        buffer.position(originalPos)
-
-        var i = 0
-        val end = array.size
-        val startIndices = ArrayList<Int>()
-        val prefixLengths = ArrayList<Int>()
-
-        while (i <= end - 3) {
-            if (array[i] == 0.toByte() && array[i + 1] == 0.toByte()) {
-                if (i <= end - 4 && array[i + 2] == 0.toByte() && array[i + 3] == 1.toByte()) {
-                    startIndices.add(i + 4)
-                    prefixLengths.add(4)
-                    i += 4
-                    continue
-                } else if (array[i + 2] == 1.toByte()) {
-                    startIndices.add(i + 3)
-                    prefixLengths.add(3)
-                    i += 3
-                    continue
-                }
-            }
-            i++
-        }
-
-        if (startIndices.isEmpty()) {
-            if (array.isNotEmpty()) result.add(array)
-            return result
-        }
-
-        for (k in 0 until startIndices.size) {
-            val nalStart = startIndices[k]
-            val nalEnd = if (k < startIndices.size - 1) {
-                startIndices[k + 1] - prefixLengths[k + 1]
-            } else {
-                end
-            }
-            val nalSize = nalEnd - nalStart
-            if (nalSize > 0) {
-                val nalBytes = ByteArray(nalSize)
-                System.arraycopy(array, nalStart, nalBytes, 0, nalSize)
-                result.add(nalBytes)
-            }
-        }
-        return result
-    }
-
-    private fun sendNalUnits(buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo, stream: DataOutputStream) {
+    private fun cacheCsdBuffer(buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
         val size = bufferInfo.size
         if (size <= 0) return
-
-        if (reusableArrayBuffer.size < size) {
-            reusableArrayBuffer = ByteArray(size * 2)
-        }
-        val array = reusableArrayBuffer
+        val csd = ByteArray(size)
         val originalPos = buffer.position()
-        buffer.get(array, 0, size)
+        buffer.get(csd, 0, size)
         buffer.position(originalPos)
-
-        var i = 0
-        val end = size
-        reusableStartIndices.clear()
-        reusablePrefixLengths.clear()
-
-        while (i <= end - 3) {
-            if (array[i] == 0.toByte() && array[i + 1] == 0.toByte()) {
-                if (i <= end - 4 && array[i + 2] == 0.toByte() && array[i + 3] == 1.toByte()) {
-                    reusableStartIndices.add(i + 4)
-                    reusablePrefixLengths.add(4)
-                    i += 4
-                    continue
-                } else if (array[i + 2] == 1.toByte()) {
-                    reusableStartIndices.add(i + 3)
-                    reusablePrefixLengths.add(3)
-                    i += 3
-                    continue
-                }
-            }
-            i++
+        synchronized(this) {
+            cachedCsdBuffer = csd
         }
-
-        if (reusableStartIndices.isEmpty()) {
-            stream.writeInt(size)
-            stream.write(array, 0, size)
-            stream.flush()
-            return
-        }
-
-        for (k in 0 until reusableStartIndices.size) {
-            val nalStart = reusableStartIndices[k]
-            val nalEnd = if (k < reusableStartIndices.size - 1) {
-                reusableStartIndices[k + 1] - reusablePrefixLengths[k + 1]
-            } else {
-                end
-            }
-            val nalSize = nalEnd - nalStart
-            if (nalSize > 0) {
-                stream.writeInt(nalSize)
-                stream.write(array, nalStart, nalSize)
-            }
-        }
-        stream.flush()
     }
 
     fun stop() {
@@ -468,6 +396,7 @@ class RawH265Streamer(
 
         serverExecutor.shutdownNow()
         codecExecutor.shutdownNow()
+        networkExecutor.shutdownNow()
 
         Log.i(TAG, "RawH265Streamer остановлен, inputSurface и MediaCodec полностью освобождены")
     }
