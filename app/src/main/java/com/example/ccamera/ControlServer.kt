@@ -49,7 +49,14 @@ class ControlServer(
         val isManualFocus: Boolean = false,
         val focusDistance: Float = 0.0f,
         val maxFocusDistance: Float = 10.0f,
-        val awbMode: String = "auto"
+        val awbMode: String = "auto",
+        val maxFps: Int = 60,
+        val supportedFps: List<Int> = listOf(30, 60),
+        val currentFps: Int = 60,
+        val currentFpsRange: String = "[60, 60]",
+        val width: Int = 1920,
+        val height: Int = 1080,
+        val resolution: String = "1920x1080"
     )
 
     companion object {
@@ -325,6 +332,13 @@ class ControlServer(
                         put("focus_distance", status.focusDistance)
                         put("max_focus_distance", status.maxFocusDistance)
                         put("awb_mode", status.awbMode)
+                        put("max_fps", status.maxFps)
+                        put("supported_fps", org.json.JSONArray(status.supportedFps))
+                        put("current_fps", status.currentFps)
+                        put("current_fps_range", status.currentFpsRange)
+                        put("width", status.width)
+                        put("height", status.height)
+                        put("resolution", status.resolution)
                     }.toString()
                     return newJsonResponse(Response.Status.OK, responseJson)
                 }

@@ -17,6 +17,12 @@
 
 **VirtualCamNative Android** is a zero-cost, open-source, ultra-low latency mobile streaming engine designed to replace proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, zero-copy **Camera2 API** surface pipelines, and the companion **C++20 Windows desktop driver** ([VirtualCamNative](https://github.com/dimalinau-lab/Virtual-Camera)), it streams smooth 1080p/4K 60 FPS video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with ultra-low latency (< 30 ms).
 
+## 🚀 What's New in v2.4.0
+
+- 🤳 **Unlocked 60 FPS on Front (Selfie) Camera**: Removed the legacy 30 FPS ceiling on the selfie sensor, allowing full 60 FPS target rate and `[60, 60]` AE capture range selection.
+- 💾 **1080p Resolution & Camera Facing State Persistence**: Settings are automatically stored in `SharedPreferences`, ensuring the companion service always starts up in crisp 1080p 60 FPS on your preferred camera without resetting to defaults.
+- ⚡ **Enhanced MediaCodec & Camera2 Stability**: Hardened lifecycle management and zero-copy surface exchange prevents capture session drops during dynamic format transitions.
+
 ---
 
 ## 🚀 What's New in v2.2.0

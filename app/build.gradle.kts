@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.ccamera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 230
-        versionName = "2.3.0"
+        versionCode = 240
+        versionName = "2.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

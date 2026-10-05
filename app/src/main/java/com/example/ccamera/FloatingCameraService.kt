@@ -92,9 +92,10 @@ class FloatingCameraService : Service(),
     private var overlayController: OverlayController? = null
     private var blackoutOverlayView: View? = null
     private var isBlackoutEnabled = false
-    private var udpDiscoveryBroadcaster: UdpDiscoveryBroadcaster? = null
+    private var udpBeaconBroadcaster: UdpBeaconBroadcaster? = null
 
     private var currentCameraFacingName: String = "back"
+
     private var isTorchOn: Boolean = false
     private var isStreaming: Boolean = false
     private var currentOrientationMode: String = "vertical"
@@ -129,10 +130,16 @@ class FloatingCameraService : Service(),
     @Volatile
     private var currentAwbMode: String = "auto"
 
-    private var targetWidth: Int = 1280
-    private var targetHeight: Int = 720
-    private var targetFps: Int = 30
-    private var targetBitrate: Int = 7_000_000
+    private var targetWidth: Int = 1920
+    private var targetHeight: Int = 1080
+    private var targetFps: Int = 60
+    private var targetBitrate: Int = 10_000_000
+    @Volatile
+    private var activeMaxFps: Int = 60
+    @Volatile
+    private var activeSupportedFps: List<Int> = listOf(30, 60)
+    @Volatile
+    private var activeFpsRangeStr: String = "[60, 60]"
 
     private var isActivityInForeground = false
     @Volatile
@@ -157,8 +164,42 @@ class FloatingCameraService : Service(),
         return cameraHandler!!
     }
 
+    private fun loadCameraPrefs() {
+        try {
+            val prefs = getSharedPreferences("vcam_camera_prefs", Context.MODE_PRIVATE)
+            targetWidth = prefs.getInt("target_width", 1920)
+            targetHeight = prefs.getInt("target_height", 1080)
+            targetFps = prefs.getInt("target_fps", 60)
+            targetBitrate = prefs.getInt("target_bitrate", 10_000_000)
+            currentCameraFacingName = prefs.getString("camera_facing", "back") ?: "back"
+            activeMaxFps = 60
+            activeSupportedFps = listOf(30, 60)
+            activeFpsRangeStr = "[60, 60]"
+            Log.i("ROUTING_DEBUG", "loadCameraPrefs: ${targetWidth}x${targetHeight} @ ${targetFps}fps, facing=$currentCameraFacingName")
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "loadCameraPrefs error", e)
+        }
+    }
+
+    private fun saveCameraPrefs() {
+        try {
+            val prefs = getSharedPreferences("vcam_camera_prefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putInt("target_width", targetWidth)
+                .putInt("target_height", targetHeight)
+                .putInt("target_fps", targetFps)
+                .putInt("target_bitrate", targetBitrate)
+                .putString("camera_facing", currentCameraFacingName)
+                .apply()
+            Log.i("ROUTING_DEBUG", "saveCameraPrefs: ${targetWidth}x${targetHeight} @ ${targetFps}fps, facing=$currentCameraFacingName")
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "saveCameraPrefs error", e)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        loadCameraPrefs()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
@@ -217,7 +258,7 @@ class FloatingCameraService : Service(),
         startForegroundWithStatus("Ожидание подключения ПК...")
 
         val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
-        udpDiscoveryBroadcaster = UdpBeaconBroadcaster(deviceId).apply {
+        udpBeaconBroadcaster = UdpBeaconBroadcaster(deviceId).apply {
             start()
         }
 
@@ -253,8 +294,8 @@ class FloatingCameraService : Service(),
         disableBlackout()
         overlayController?.hideOverlay()
         overlayController = null
-        udpDiscoveryBroadcaster?.stop()
-        udpDiscoveryBroadcaster = null
+        udpBeaconBroadcaster?.stop()
+        udpBeaconBroadcaster = null
         stopStreamingInternal()
         controlServer?.stop()
         controlServer = null
@@ -656,6 +697,11 @@ class FloatingCameraService : Service(),
                     if (chars.get(CameraCharacteristics.LENS_FACING) == targetLensFacing) {
                         if (selectedCameraId == null || (targetLensFacing == CameraCharacteristics.LENS_FACING_BACK && id == "0")) {
                             selectedCameraId = id
+                            val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                            val maxFps = ranges?.map { it.upper }?.maxOrNull() ?: 30
+                            activeMaxFps = 60
+                            activeSupportedFps = listOf(30, 60)
+                            Log.i("ROUTING_DEBUG", "Выбрана камера $id ($currentCameraFacingName): maxFps=$activeMaxFps, supportedFps=$activeSupportedFps")
                         }
                     }
                 }
@@ -752,17 +798,25 @@ class FloatingCameraService : Service(),
 
             val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
+            activeMaxFps = 60
+            activeSupportedFps = listOf(30, 60)
 
-            val selectedRange = if (targetFps >= 60 && maxSensorFps >= 60) {
-                availableFpsRanges?.firstOrNull { it.lower >= 60 && it.upper >= 60 }
+            val selectedRange = if (targetFps >= 60) {
+                // Priority 1: Exact fixed 60 FPS range [60, 60] (prevents AE from dropping to 30 in low light)
+                availableFpsRanges?.firstOrNull { it.lower == 60 && it.upper == 60 }
+                    ?: availableFpsRanges?.firstOrNull { it.lower >= 60 && it.upper >= 60 }
                     ?: availableFpsRanges?.firstOrNull { it.lower >= 30 && it.upper >= 60 }
                     ?: availableFpsRanges?.firstOrNull { it.upper >= 60 }
-                    ?: Range(60, 60)
+                    ?: availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
+                    ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
+                    ?: Range(30, 30)
             } else {
                 availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
                     ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
                     ?: Range(30, 30)
             }
+            activeFpsRangeStr = selectedRange.toString()
+            Log.i("ROUTING_DEBUG", "[Camera2] FPS: camera=$currentCameraFacingName (id=${camera.id}), targetFps=$targetFps, maxSensorFps=$maxSensorFps, selectedRange=$selectedRange, available=${availableFpsRanges?.toList()}")
 
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
             builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CameraMetadata.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
@@ -1080,7 +1134,14 @@ class FloatingCameraService : Service(),
             isManualFocus = isManualFocus,
             focusDistance = currentFocusDistance,
             maxFocusDistance = maxFocusDistance,
-            awbMode = currentAwbMode
+            awbMode = currentAwbMode,
+            maxFps = activeMaxFps,
+            supportedFps = activeSupportedFps,
+            currentFps = targetFps,
+            currentFpsRange = activeFpsRangeStr,
+            width = targetWidth,
+            height = targetHeight,
+            resolution = "${targetWidth}x${targetHeight}"
         )
     }
 
@@ -1196,7 +1257,7 @@ class FloatingCameraService : Service(),
             "720p" -> Pair(1280, 720)
             "1080p" -> Pair(1920, 1080)
             "4k", "2160p" -> Pair(3840, 2160)
-            else -> Pair(1280, 720)
+            else -> Pair(1920, 1080)
         }
 
         val isResChanged = (newWidth != targetWidth || newHeight != targetHeight)
@@ -1205,22 +1266,18 @@ class FloatingCameraService : Service(),
 
         Log.i("ROUTING_DEBUG", "applyStreamConfig: resolution=$resolution (${newWidth}x${newHeight}), fps=$fps, bitrate=$bitrate | isResChanged=$isResChanged, isFpsChanged=$isFpsChanged, isBitrateChanged=$isBitrateChanged")
 
+        targetBitrate = bitrate
+        targetFps = fps
+        targetWidth = newWidth
+        targetHeight = newHeight
+        saveCameraPrefs()
+
         if (!isResChanged && !isFpsChanged && isBitrateChanged) {
             updateBitrateOnTheFly(bitrate)
             return
         }
 
-        if (!isResChanged && isFpsChanged) {
-            if (isBitrateChanged) {
-                updateBitrateOnTheFly(bitrate)
-            }
-            updateFpsOnTheFly(fps)
-            return
-        }
-
-        if (isResChanged) {
-            targetBitrate = bitrate
-            targetFps = fps
+        if (isResChanged || isFpsChanged) {
             rebindResolutionOnly(newWidth, newHeight)
             return
         }
@@ -1235,6 +1292,7 @@ class FloatingCameraService : Service(),
             isTorchOn = false
         }
 
+        saveCameraPrefs()
         bindCamera()
     }
 
@@ -1308,8 +1366,8 @@ class FloatingCameraService : Service(),
         overlayController?.hideOverlay()
         overlayController = null
 
-        udpDiscoveryBroadcaster?.stop()
-        udpDiscoveryBroadcaster = null
+        udpBeaconBroadcaster?.stop()
+        udpBeaconBroadcaster = null
 
         releaseLocks()
         stopStreamingInternal()
