@@ -145,6 +145,47 @@
             android:visibility="gone" />
     </LinearLayout>
 
+    <!-- 2c. Floating Mode Toggle Pill (Clear visual status & description) -->
+    <LinearLayout
+        android:id="@+id/btnFloatingTogglePill"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="92dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_bottom_bar"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="7dp"
+        android:clickable="true"
+        android:focusable="true">
+
+        <ImageView
+            android:id="@+id/ivFloatingPillIcon"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_marginEnd="6dp"
+            android:src="@drawable/ic_floating_window"
+            app:tint="#38BDF8" />
+
+        <TextView
+            android:id="@+id/tvFloatingPillText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Поверх приложений: ВКЛ"
+            android:textColor="#38BDF8"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <View
+            android:id="@+id/dotFloatingPill"
+            android:layout_width="7dp"
+            android:layout_height="7dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_overlay_dot_core"
+            android:backgroundTint="#10B981" />
+    </LinearLayout>
+
     <!-- 3. Bottom Glassmorphic Control Bar -->
     <LinearLayout
         android:id="@+id/bottomActionBar"

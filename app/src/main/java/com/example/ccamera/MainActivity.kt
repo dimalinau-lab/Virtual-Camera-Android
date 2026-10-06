@@ -38,6 +38,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -59,6 +60,8 @@ class MainActivity : AppCompatActivity() {
 
     private var cameraService: FloatingCameraService? = null
     private var isServiceBound = false
+    private var isFloatingEnabled = true
+    private var isNavigatingToSettings = false
 
     private var isZenUiHidden = false
     private val zenHideHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -82,6 +85,9 @@ class MainActivity : AppCompatActivity() {
         binding.bottomActionBar.animate().alpha(1f).setDuration(250).withStartAction {
             binding.bottomActionBar.visibility = View.VISIBLE
         }.start()
+        binding.btnFloatingTogglePill.animate().alpha(1f).setDuration(250).withStartAction {
+            binding.btnFloatingTogglePill.visibility = View.VISIBLE
+        }.start()
 
         zenHideHandler.removeCallbacks(zenHideRunnable)
         if (cameraService?.isStreamingActive() == true) {
@@ -96,6 +102,9 @@ class MainActivity : AppCompatActivity() {
         }.start()
         binding.bottomActionBar.animate().alpha(0f).setDuration(300).withEndAction {
             binding.bottomActionBar.visibility = View.INVISIBLE
+        }.start()
+        binding.btnFloatingTogglePill.animate().alpha(0f).setDuration(300).withEndAction {
+            binding.btnFloatingTogglePill.visibility = View.INVISIBLE
         }.start()
     }
 
@@ -188,7 +197,7 @@ class MainActivity : AppCompatActivity() {
                     .setAspectRatio(Rational(9, 16))
                     .setActions(getPipActions())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    paramsBuilder.setAutoEnterEnabled(true)
+                    paramsBuilder.setAutoEnterEnabled(isFloatingEnabled)
                 }
                 setPictureInPictureParams(paramsBuilder.build())
             } catch (e: Exception) {
@@ -206,6 +215,8 @@ class MainActivity : AppCompatActivity() {
             cameraService?.addStatusListener(statusListener)
             setupPreviewSurface()
             cameraService?.startCameraOnce()
+            isFloatingEnabled = cameraService?.isFloatingOverlayEnabled() ?: isFloatingEnabled
+            updateFloatingModeUI(isFloatingEnabled)
             updateMuteButtonUI(cameraService?.isMicMuted() ?: true)
             updateStreamingStatusUI(cameraService?.isStreamingActive() ?: false)
             updatePipParams()
@@ -235,10 +246,19 @@ class MainActivity : AppCompatActivity() {
     private val overlayPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
-        if (Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Разрешение на оверлей получено", Toast.LENGTH_SHORT).show()
+        val hasOverlay = Settings.canDrawOverlays(this)
+        if (hasOverlay) {
+            Toast.makeText(this, "Разрешение получено: режим поверх приложений включен", Toast.LENGTH_SHORT).show()
+            isFloatingEnabled = true
+            cameraService?.setFloatingOverlayEnabled(true)
+            saveFloatingPref(true)
+            updateFloatingModeUI(true)
         } else {
-            Toast.makeText(this, "Оверлей-виджет будет недоступен без разрешения", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Разрешение не предоставлено: режим выключен", Toast.LENGTH_SHORT).show()
+            isFloatingEnabled = false
+            cameraService?.setFloatingOverlayEnabled(false)
+            saveFloatingPref(false)
+            updateFloatingModeUI(false)
         }
     }
 
@@ -254,7 +274,13 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         // 1. Принудительный портретный режим
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        try {
+            if (requestedOrientation != ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "requestedOrientation suppressed", e)
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -285,8 +311,15 @@ class MainActivity : AppCompatActivity() {
             val bottomLp = binding.bottomActionBar.layoutParams as? ViewGroup.MarginLayoutParams
             if (bottomLp != null) {
                 val baseMargin = (32 * density).toInt()
-                bottomLp.bottomMargin = maxOf(navBars.bottom + (16 * density).toInt(), baseMargin)
+                val bottomMargin = maxOf(navBars.bottom + (16 * density).toInt(), baseMargin)
+                bottomLp.bottomMargin = bottomMargin
                 binding.bottomActionBar.layoutParams = bottomLp
+
+                val pillLp = binding.btnFloatingTogglePill.layoutParams as? ViewGroup.MarginLayoutParams
+                if (pillLp != null) {
+                    pillLp.bottomMargin = bottomMargin + (56 * density).toInt()
+                    binding.btnFloatingTogglePill.layoutParams = pillLp
+                }
             }
 
             windowInsets
@@ -335,17 +368,39 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnFloatingMode.setOnClickListener {
-            if (Settings.canDrawOverlays(this)) {
-                cameraService?.showFloatingOverlay()
-                moveTaskToBack(true)
+            toggleFloatingMode()
+        }
+
+        binding.btnFloatingMode.setOnLongClickListener {
+            if (isFloatingEnabled) {
+                if (Settings.canDrawOverlays(this)) {
+                    cameraService?.showFloatingOverlay()
+                    moveTaskToBack(true)
+                } else {
+                    requestOverlayPermission()
+                }
             } else {
-                Toast.makeText(this, "Предоставьте разрешение для плавающего виджета", Toast.LENGTH_SHORT).show()
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                )
-                overlayPermissionLauncher.launch(intent)
+                Toast.makeText(this, "Включите режим поверх приложений нажатием на кнопку", Toast.LENGTH_SHORT).show()
             }
+            true
+        }
+
+        binding.btnFloatingTogglePill.setOnClickListener {
+            toggleFloatingMode()
+        }
+
+        binding.btnFloatingTogglePill.setOnLongClickListener {
+            if (isFloatingEnabled) {
+                if (Settings.canDrawOverlays(this)) {
+                    cameraService?.showFloatingOverlay()
+                    moveTaskToBack(true)
+                } else {
+                    requestOverlayPermission()
+                }
+            } else {
+                Toast.makeText(this, "Включите режим поверх приложений нажатием на плашку", Toast.LENGTH_SHORT).show()
+            }
+            true
         }
 
         binding.btnEcoBlackout.setOnClickListener {
@@ -386,8 +441,82 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(pipReceiver, filter)
         }
 
+        val prefs = getSharedPreferences("vcam_camera_prefs", Context.MODE_PRIVATE)
+        isFloatingEnabled = prefs.getBoolean("pref_floating_enabled", true)
+        updateFloatingModeUI(isFloatingEnabled)
+
         updateMuteButtonUI(cameraService?.isMicMuted() ?: false)
         checkAndRequestPermissions()
+    }
+
+    private fun getSafeDrawable(resId: Int): android.graphics.drawable.Drawable? {
+        return try {
+            AppCompatResources.getDrawable(this, resId)
+        } catch (_: Exception) {
+            try {
+                ContextCompat.getDrawable(this, resId)
+            } catch (_: Exception) {
+                AppCompatResources.getDrawable(this, R.drawable.ic_floating_window)
+            }
+        }
+    }
+
+    private fun updateFloatingModeUI(enabled: Boolean) {
+        val drawableRes = if (enabled) R.drawable.ic_floating_window else R.drawable.ic_floating_window_off
+        val iconDrawable = getSafeDrawable(drawableRes)
+
+        // 1. Информативная плашка с текстом и индикатором статуса
+        binding.ivFloatingPillIcon.setImageDrawable(iconDrawable)
+        binding.ivFloatingPillIcon.imageTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#71717A"))
+        binding.tvFloatingPillText.text = if (enabled) "Поверх приложений: ВКЛ" else "Поверх приложений: ВЫКЛ"
+        binding.tvFloatingPillText.setTextColor(if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#A1A1AA"))
+        binding.dotFloatingPill.backgroundTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#10B981") else Color.parseColor("#71717A"))
+
+        // 2. Круглая кнопка в панели действий
+        binding.btnFloatingMode.setImageDrawable(iconDrawable)
+        binding.btnFloatingMode.imageTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#71717A"))
+        binding.btnFloatingMode.backgroundTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#3338BDF8") else Color.parseColor("#26FFFFFF"))
+        binding.btnFloatingMode.contentDescription = if (enabled) "Работа поверх приложений: ВКЛ" else "Работа поверх приложений: ВЫКЛ"
+
+        updatePipParams()
+    }
+
+    private fun toggleFloatingMode() {
+        val newState = !isFloatingEnabled
+        if (newState && !Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Предоставьте разрешение для работы поверх приложений", Toast.LENGTH_SHORT).show()
+            requestOverlayPermission()
+            return
+        }
+
+        isFloatingEnabled = newState
+        cameraService?.setFloatingOverlayEnabled(newState)
+        saveFloatingPref(newState)
+        updateFloatingModeUI(newState)
+
+        if (newState) {
+            Toast.makeText(this, "✅ Работа поверх приложений: ВКЛ\nПри сворачивании откроется плавающее окно", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "🛑 Работа поверх приложений: ВЫКЛ\nПри сворачивании приложение выключится", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun requestOverlayPermission() {
+        isNavigatingToSettings = true
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName")
+        )
+        overlayPermissionLauncher.launch(intent)
+    }
+
+    private fun saveFloatingPref(enabled: Boolean) {
+        try {
+            val prefs = getSharedPreferences("vcam_camera_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putBoolean("pref_floating_enabled", enabled).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Ошибка сохранения pref_floating_enabled", e)
+        }
     }
 
     private fun updateMuteButtonUI(isMuted: Boolean) {
@@ -437,9 +566,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        isNavigatingToSettings = false
+        if (isServiceBound) {
+            cameraService?.startCameraOnce()
+        }
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        enterPipMode()
+        if (isFloatingEnabled) {
+            if (Settings.canDrawOverlays(this)) {
+                cameraService?.showFloatingOverlay()
+            } else {
+                enterPipMode()
+            }
+        }
     }
 
     private fun enterPipMode() {
@@ -469,10 +612,12 @@ class MainActivity : AppCompatActivity() {
             binding.blackoutOverlay.visibility = View.GONE
             binding.topBarLayout.visibility = View.GONE
             binding.bottomActionBar.visibility = View.GONE
+            binding.btnFloatingTogglePill.visibility = View.GONE
             supportActionBar?.hide()
         } else {
             binding.topBarLayout.visibility = View.VISIBLE
             binding.bottomActionBar.visibility = View.VISIBLE
+            binding.btnFloatingTogglePill.visibility = View.VISIBLE
             supportActionBar?.show()
             updatePipParams()
         }
@@ -523,6 +668,10 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode) {
             return
         }
+        if (!isFloatingEnabled) {
+            Log.i(TAG, "Сворачивание при выключенном режиме поверх приложений -> освобождение камеры и остановка трансляции")
+            cameraService?.stopStreamingInternal()
+        }
         if (isServiceBound) {
             cameraService?.removeStatusListener(statusListener)
             cameraService?.setPreviewDisplaySurface(null)
@@ -552,14 +701,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (!Settings.canDrawOverlays(this)) {
+        if (isFloatingEnabled && !Settings.canDrawOverlays(this)) {
             try {
                 Toast.makeText(this, "Предоставьте разрешение для оверлей-виджета", Toast.LENGTH_LONG).show()
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                )
-                overlayPermissionLauncher.launch(intent)
+                requestOverlayPermission()
             } catch (e: Exception) {
                 Log.e(TAG, "Ошибка открытия настроек оверлея", e)
             }
@@ -568,6 +713,7 @@ class MainActivity : AppCompatActivity() {
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
             try {
+                isNavigatingToSettings = true
                 val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                     data = Uri.parse("package:$packageName")
                 }
@@ -579,6 +725,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startAndBindCameraService() {
+        if (isServiceBound) return
         val serviceIntent = Intent(this, FloatingCameraService::class.java)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -612,6 +759,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startApkUpdate(update: UpdateManager.UpdateInfo) {
+        isNavigatingToSettings = true
         binding.updateProgressBar.visibility = View.VISIBLE
         binding.updateProgressBar.progress = 0
         binding.tvUpdateDesc.text = "Загрузка обновления..."

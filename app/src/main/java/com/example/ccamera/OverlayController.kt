@@ -79,6 +79,10 @@ class OverlayController(
 
     fun showOverlay() {
         if (isOverlayShown) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { showOverlay() }
+            return
+        }
         if (!Settings.canDrawOverlays(context)) {
             Log.w(TAG, "Нет разрешения SYSTEM_ALERT_WINDOW на отображение поверх окон")
             return
@@ -113,6 +117,10 @@ class OverlayController(
 
     fun hideOverlay() {
         if (!isOverlayShown) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { hideOverlay() }
+            return
+        }
         try {
             mainHandler.removeCallbacks(autoHideRunnable)
             surface?.release()
@@ -121,7 +129,11 @@ class OverlayController(
 
             overlayView?.let { view ->
                 if (view.isAttachedToWindow) {
-                    windowManager.removeView(view)
+                    try {
+                        windowManager.removeView(view)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "removeView warning", e)
+                    }
                 }
             }
             overlayView = null

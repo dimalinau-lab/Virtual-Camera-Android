@@ -92,6 +92,7 @@ class FloatingCameraService : Service(),
     private var overlayController: OverlayController? = null
     private var blackoutOverlayView: View? = null
     private var isBlackoutEnabled = false
+    private var isFloatingOverlayEnabled = true
     private var udpBeaconBroadcaster: UdpBeaconBroadcaster? = null
 
     private var currentCameraFacingName: String = "back"
@@ -172,10 +173,11 @@ class FloatingCameraService : Service(),
             targetFps = prefs.getInt("target_fps", 60)
             targetBitrate = prefs.getInt("target_bitrate", 10_000_000)
             currentCameraFacingName = prefs.getString("camera_facing", "back") ?: "back"
+            isFloatingOverlayEnabled = prefs.getBoolean("pref_floating_enabled", true)
             activeMaxFps = 60
             activeSupportedFps = listOf(30, 60)
             activeFpsRangeStr = "[60, 60]"
-            Log.i("ROUTING_DEBUG", "loadCameraPrefs: ${targetWidth}x${targetHeight} @ ${targetFps}fps, facing=$currentCameraFacingName")
+            Log.i("ROUTING_DEBUG", "loadCameraPrefs: ${targetWidth}x${targetHeight} @ ${targetFps}fps, facing=$currentCameraFacingName, floating=$isFloatingOverlayEnabled")
         } catch (e: Exception) {
             Log.e("ROUTING_DEBUG", "loadCameraPrefs error", e)
         }
@@ -190,10 +192,74 @@ class FloatingCameraService : Service(),
                 .putInt("target_fps", targetFps)
                 .putInt("target_bitrate", targetBitrate)
                 .putString("camera_facing", currentCameraFacingName)
+                .putBoolean("pref_floating_enabled", isFloatingOverlayEnabled)
                 .apply()
-            Log.i("ROUTING_DEBUG", "saveCameraPrefs: ${targetWidth}x${targetHeight} @ ${targetFps}fps, facing=$currentCameraFacingName")
+            Log.i("ROUTING_DEBUG", "saveCameraPrefs: ${targetWidth}x${targetHeight} @ ${targetFps}fps, facing=$currentCameraFacingName, floating=$isFloatingOverlayEnabled")
         } catch (e: Exception) {
             Log.e("ROUTING_DEBUG", "saveCameraPrefs error", e)
+        }
+    }
+
+    private fun initControllersIfNeeded() {
+        if (overlayController == null) {
+            overlayController = OverlayController(this, object : OverlayController.OverlayListener {
+                override fun onSurfaceAvailable(surface: Surface) {
+                    Log.i("ROUTING_DEBUG", "Overlay surface available: $surface")
+                    overlayDisplaySurface = surface
+                    if (activityDisplaySurface == null) {
+                        displaySurface = surface
+                        updateSessionTargets()
+                    }
+                }
+
+                override fun onSurfaceDestroyed() {
+                    Log.i("ROUTING_DEBUG", "Overlay surface destroyed")
+                    if (displaySurface == overlayDisplaySurface) {
+                        displaySurface = null
+                        updateSessionTargets()
+                    }
+                    overlayDisplaySurface = null
+                }
+
+                override fun onFlipCamera() {
+                    switchCamera()
+                }
+
+                override fun onToggleMute(): Boolean {
+                    val isMuted = toggleMicMute()
+                    updateNotification(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+                    return isMuted
+                }
+
+                override fun onExpandToApp() {
+                    try {
+                        val intent = Intent(this@FloatingCameraService, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        }
+                        startActivity(intent)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Ошибка перехода в полноэкранный режим", e)
+                    }
+                }
+
+                override fun onToggleEco() {
+                    toggleBlackout()
+                }
+
+                override fun onCloseService() {
+                    stopServiceInternal()
+                }
+            })
+        }
+
+        acquireLocks()
+        startControlServer()
+
+        if (udpBeaconBroadcaster == null) {
+            val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
+            udpBeaconBroadcaster = UdpBeaconBroadcaster(deviceId).apply {
+                start()
+            }
         }
     }
 
@@ -204,63 +270,8 @@ class FloatingCameraService : Service(),
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
 
-        overlayController = OverlayController(this, object : OverlayController.OverlayListener {
-            override fun onSurfaceAvailable(surface: Surface) {
-                Log.i("ROUTING_DEBUG", "Overlay surface available: $surface")
-                overlayDisplaySurface = surface
-                if (activityDisplaySurface == null) {
-                    displaySurface = surface
-                    updateSessionTargets()
-                }
-            }
-
-            override fun onSurfaceDestroyed() {
-                Log.i("ROUTING_DEBUG", "Overlay surface destroyed")
-                if (displaySurface == overlayDisplaySurface) {
-                    displaySurface = null
-                    updateSessionTargets()
-                }
-                overlayDisplaySurface = null
-            }
-
-            override fun onFlipCamera() {
-                switchCamera()
-            }
-
-            override fun onToggleMute(): Boolean {
-                val isMuted = toggleMicMute()
-                updateNotification(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
-                return isMuted
-            }
-
-            override fun onExpandToApp() {
-                try {
-                    val intent = Intent(this@FloatingCameraService, MainActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    }
-                    startActivity(intent)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Ошибка перехода в полноэкранный режим", e)
-                }
-            }
-
-            override fun onToggleEco() {
-                toggleBlackout()
-            }
-
-            override fun onCloseService() {
-                stopServiceInternal()
-            }
-        })
-
-        acquireLocks()
-        startControlServer()
+        initControllersIfNeeded()
         startForegroundWithStatus("Ожидание подключения ПК...")
-
-        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
-        udpBeaconBroadcaster = UdpBeaconBroadcaster(deviceId).apply {
-            start()
-        }
 
         Log.i(TAG, "FloatingCameraService создан, UDP маяк и Foreground запущены")
     }
@@ -286,22 +297,46 @@ class FloatingCameraService : Service(),
             }
         }
 
+        try {
+            startForegroundWithStatus(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+        } catch (e: Exception) {
+            Log.e(TAG, "Ошибка startForegroundWithStatus в onStartCommand", e)
+        }
+
+        initControllersIfNeeded()
         startCameraOnce()
         return START_STICKY
     }
 
+    fun stopSelfGracefully() {
+        try {
+            stopServiceInternal()
+        } catch (e: Exception) {
+            Log.e(TAG, "Ошибка stopSelfGracefully", e)
+        }
+    }
+
     private fun stopServiceInternal() {
-        disableBlackout()
-        overlayController?.hideOverlay()
-        overlayController = null
-        udpBeaconBroadcaster?.stop()
-        udpBeaconBroadcaster = null
-        stopStreamingInternal()
-        controlServer?.stop()
-        controlServer = null
-        releaseLocks()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        try {
+            disableBlackout()
+            overlayController?.hideOverlay()
+            overlayController = null
+            udpBeaconBroadcaster?.stop()
+            udpBeaconBroadcaster = null
+            stopStreamingInternal(isShuttingDown = true)
+            controlServer?.stop()
+            controlServer = null
+            releaseLocks()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+        } catch (e: Exception) {
+            Log.e(TAG, "Ошибка stopServiceInternal", e)
+        }
     }
 
     fun startCameraOnce() {
@@ -591,7 +626,7 @@ class FloatingCameraService : Service(),
         bindCamera()
     }
 
-    fun stopStreamingInternal() {
+    fun stopStreamingInternal(isShuttingDown: Boolean = false) {
         isStreaming = false
         isCameraInitialized = false
         try {
@@ -606,8 +641,12 @@ class FloatingCameraService : Service(),
         } catch (_: Exception) {}
         streamer = null
 
-        updateNotification("Отключено по команде ПК")
-        overlayController?.setStatus(OverlayController.Status.WAITING)
+        if (!isShuttingDown) {
+            try {
+                updateNotification("Отключено по команде ПК")
+                overlayController?.setStatus(OverlayController.Status.WAITING)
+            } catch (_: Exception) {}
+        }
     }
 
     fun setPreviewDisplaySurface(surface: Surface?) {
@@ -618,11 +657,11 @@ class FloatingCameraService : Service(),
             displaySurface = surface
         } else {
             displaySurface = overlayDisplaySurface
-            if (isStreaming || isCameraInitialized) {
+            if (isFloatingOverlayEnabled && (isStreaming || isCameraInitialized)) {
                 overlayController?.showOverlay()
             }
         }
-        Log.i("ROUTING_DEBUG", "setPreviewDisplaySurface: activitySurface=$surface, overlaySurface=$overlayDisplaySurface, displaySurface=$displaySurface")
+        Log.i("ROUTING_DEBUG", "setPreviewDisplaySurface: activitySurface=$surface, overlaySurface=$overlayDisplaySurface, displaySurface=$displaySurface, floating=$isFloatingOverlayEnabled")
 
         // Если камера уже открыта — безопасно обновляем сессию с новым экраном
         val camera = cameraDevice ?: return
@@ -1329,7 +1368,18 @@ class FloatingCameraService : Service(),
         }
     }
 
+    fun isFloatingOverlayEnabled(): Boolean = isFloatingOverlayEnabled
+
+    fun setFloatingOverlayEnabled(enabled: Boolean) {
+        isFloatingOverlayEnabled = enabled
+        if (!enabled) {
+            overlayController?.hideOverlay()
+        }
+        saveCameraPrefs()
+    }
+
     fun showFloatingOverlay() {
+        if (!isFloatingOverlayEnabled) return
         overlayController?.showOverlay()
     }
 
@@ -1370,11 +1420,13 @@ class FloatingCameraService : Service(),
         udpBeaconBroadcaster = null
 
         releaseLocks()
-        stopStreamingInternal()
+        stopStreamingInternal(isShuttingDown = true)
         controlServer?.stop()
         controlServer = null
 
-        cameraThread?.quitSafely()
+        try {
+            cameraThread?.quitSafely()
+        } catch (_: Exception) {}
         cameraThread = null
         cameraHandler = null
 
