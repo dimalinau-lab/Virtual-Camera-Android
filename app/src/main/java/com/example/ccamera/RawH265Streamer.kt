@@ -21,8 +21,8 @@ class RawH265Streamer(
     private val port: Int = 8554,
     @Volatile private var width: Int = 1280,
     @Volatile private var height: Int = 720,
-    bitRate: Int = 7_000_000,
-    @Volatile private var frameRate: Int = 30,
+    bitRate: Int = 5_500_000,
+    @Volatile private var frameRate: Int = 60,
     private val listener: StatusListener? = null
 ) {
     interface StatusListener {
@@ -57,11 +57,32 @@ class RawH265Streamer(
 
     private val serverExecutor = Executors.newSingleThreadExecutor()
     private val codecExecutor = Executors.newSingleThreadExecutor()
+    class PooledFrame(var data: ByteArray, var size: Int = 0)
+
     private val networkExecutor = Executors.newSingleThreadExecutor()
-    private val frameQueue = ArrayBlockingQueue<ByteArray>(4)
+    private val framePool = ArrayBlockingQueue<PooledFrame>(16)
+    private val frameQueue = ArrayBlockingQueue<PooledFrame>(6)
+
+    init {
+        for (i in 0 until 16) {
+            framePool.offer(PooledFrame(ByteArray(256 * 1024), 0))
+        }
+    }
+
+    private fun obtainFrame(minCapacity: Int): PooledFrame {
+        val pooled = framePool.poll() ?: PooledFrame(ByteArray(maxOf(minCapacity, 256 * 1024)), 0)
+        if (pooled.data.size < minCapacity) {
+            pooled.data = ByteArray(maxOf(minCapacity, pooled.data.size * 2))
+        }
+        return pooled
+    }
+
+    private fun recycleFrame(frame: PooledFrame) {
+        frame.size = 0
+        framePool.offer(frame)
+    }
 
     private var cachedCsdBuffer: ByteArray? = null
-    private var reusableArrayBuffer = ByteArray(256 * 1024)
 
     fun start() {
         if (isRunning.getAndSet(true)) return
@@ -117,7 +138,10 @@ class RawH265Streamer(
             dataOutputStream = null
             clientSocket = null
             isConnected.set(false)
-            frameQueue.clear()
+            while (true) {
+                val leftover = frameQueue.poll() ?: break
+                recycleFrame(leftover)
+            }
         }
         if (isRunning.get()) {
             listener?.onStatusChanged("Ожидание подключения C++ клиента...", false)
@@ -156,7 +180,7 @@ class RawH265Streamer(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, frameRate)
                 }
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Ключевой кадр каждую секунду
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3) // Устраняем тепловой конфликт/дублирование с Intra-Refresh
 
                 // Ультра-низкая задержка (Ultra Low-Latency):
                 setInteger("latency", 0)
@@ -164,7 +188,8 @@ class RawH265Streamer(
                     setInteger(MediaFormat.KEY_LATENCY, 0)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+                    // Согласуем частоту чипа VPU с реальным FPS вместо принудительного оверклока Short.MAX_VALUE
+                    setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate)
                     setInteger(MediaFormat.KEY_PRIORITY, 0)
                 }
                 // 3. Отключаем B-кадры и скрытую задержку чипа
@@ -273,12 +298,19 @@ class RawH265Streamer(
             while (isRunning.get()) {
                 try {
                     val frame = frameQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
-                    if (!isConnected.get() || isPaused) continue
+                    if (!isConnected.get() || isPaused) {
+                        recycleFrame(frame)
+                        continue
+                    }
 
-                    val stream = dataOutputStream ?: continue
+                    val stream = dataOutputStream ?: run {
+                        recycleFrame(frame)
+                        continue
+                    }
                     stream.writeInt(frame.size)
-                    stream.write(frame)
+                    stream.write(frame.data, 0, frame.size)
                     stream.flush()
+                    recycleFrame(frame)
                 } catch (e: Exception) {
                     if (isRunning.get() && isConnected.get()) {
                         Log.e(TAG, "Ошибка передачи пакета по сети", e)
@@ -306,7 +338,7 @@ class RawH265Streamer(
                 }
 
                 try {
-                    val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 2_000L)
+                    val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
                     if (outputBufferIndex >= 0) {
                         val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
                         if (outputBuffer != null && bufferInfo.size > 0) {
@@ -338,15 +370,19 @@ class RawH265Streamer(
 
                             if (isConnected.get() && !isPaused && bufferInfo.size > 0) {
                                 val size = bufferInfo.size
-                                val frameBytes = ByteArray(size)
+                                val frame = obtainFrame(size)
                                 val originalPos = outputBuffer.position()
-                                outputBuffer.get(frameBytes, 0, size)
+                                outputBuffer.get(frame.data, 0, size)
                                 outputBuffer.position(originalPos)
+                                frame.size = size
 
-                                // Если Wi-Fi временно перегружен (очередь 4 кадра заполнена), сбрасываем старый кадр и просим чистый IDR
-                                if (!frameQueue.offer(frameBytes)) {
-                                    frameQueue.poll()
-                                    frameQueue.offer(frameBytes)
+                                // Если Wi-Fi временно перегружен (очередь 6 кадров заполнена), сбрасываем старый кадр и просим чистый IDR
+                                if (!frameQueue.offer(frame)) {
+                                    val dropped = frameQueue.poll()
+                                    if (dropped != null) recycleFrame(dropped)
+                                    if (!frameQueue.offer(frame)) {
+                                        recycleFrame(frame)
+                                    }
                                     requestKeyFrame()
                                 }
                             }
@@ -374,6 +410,7 @@ class RawH265Streamer(
         if (!isRunning.getAndSet(false)) return
 
         disconnectClient()
+        framePool.clear()
 
         try {
             serverSocket?.close()

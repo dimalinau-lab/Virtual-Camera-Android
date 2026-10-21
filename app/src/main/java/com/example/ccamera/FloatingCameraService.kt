@@ -134,7 +134,7 @@ class FloatingCameraService : Service(),
     private var targetWidth: Int = 1920
     private var targetHeight: Int = 1080
     private var targetFps: Int = 60
-    private var targetBitrate: Int = 10_000_000
+    private var targetBitrate: Int = 5_500_000
     @Volatile
     private var activeMaxFps: Int = 60
     @Volatile
@@ -171,7 +171,7 @@ class FloatingCameraService : Service(),
             targetWidth = prefs.getInt("target_width", 1920)
             targetHeight = prefs.getInt("target_height", 1080)
             targetFps = prefs.getInt("target_fps", 60)
-            targetBitrate = prefs.getInt("target_bitrate", 10_000_000)
+            targetBitrate = prefs.getInt("target_bitrate", 5_500_000)
             currentCameraFacingName = prefs.getString("camera_facing", "back") ?: "back"
             isFloatingOverlayEnabled = prefs.getBoolean("pref_floating_enabled", true)
             activeMaxFps = 60

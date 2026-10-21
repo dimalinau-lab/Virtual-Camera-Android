@@ -69,6 +69,25 @@ class MainActivity : AppCompatActivity() {
         hideZenUi()
     }
 
+    private val autoBlackoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val autoBlackoutRunnable = Runnable {
+        if (cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
+            enableBlackout()
+            Toast.makeText(this, "Энергосбережение: экран затемнен (коснитесь для пробуждения)", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun scheduleAutoBlackout() {
+        autoBlackoutHandler.removeCallbacks(autoBlackoutRunnable)
+        if (cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
+            autoBlackoutHandler.postDelayed(autoBlackoutRunnable, 30_000L)
+        }
+    }
+
+    private fun cancelAutoBlackout() {
+        autoBlackoutHandler.removeCallbacks(autoBlackoutRunnable)
+    }
+
     private fun toggleZenUi() {
         if (isZenUiHidden) {
             showZenUi()
@@ -347,17 +366,10 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        // 2. Выход из блэкаута по двойному тапу
-        gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                disableBlackout()
-                return true
-            }
-        })
-
+        // 2. Выход из блэкаута по касанию любого места экрана
         binding.blackoutOverlay.setOnTouchListener { v, event ->
-            gestureDetector.onTouchEvent(event)
-            if (event.action == MotionEvent.ACTION_UP) {
+            if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_DOWN) {
+                disableBlackout()
                 v.performClick()
             }
             true
@@ -539,10 +551,15 @@ class MainActivity : AppCompatActivity() {
             // Zen Mode: автоскрытие рамок управления через 3 секунды после начала стрима
             zenHideHandler.removeCallbacks(zenHideRunnable)
             zenHideHandler.postDelayed(zenHideRunnable, 3000)
+            scheduleAutoBlackout()
         } else {
             binding.statusText.text = "ОЖИДАНИЕ ПК"
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FFC107"))
             zenHideHandler.removeCallbacks(zenHideRunnable)
+            cancelAutoBlackout()
+            if (binding.blackoutOverlay.visibility == View.VISIBLE) {
+                disableBlackout()
+            }
             showZenUi()
         }
     }
@@ -552,6 +569,7 @@ class MainActivity : AppCompatActivity() {
         val lp = window.attributes
         lp.screenBrightness = 0.01f
         window.attributes = lp
+        cancelAutoBlackout()
     }
 
     override fun onStart() {
@@ -744,6 +762,21 @@ class MainActivity : AppCompatActivity() {
         val lp = window.attributes
         lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         window.attributes = lp
+        if (cameraService?.isStreamingActive() == true) {
+            scheduleAutoBlackout()
+        }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN) {
+            if (binding.blackoutOverlay.visibility == View.VISIBLE) {
+                disableBlackout()
+                return true
+            } else if (cameraService?.isStreamingActive() == true) {
+                scheduleAutoBlackout()
+            }
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     private fun checkAppUpdates() {
@@ -793,6 +826,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cancelAutoBlackout()
+        zenHideHandler.removeCallbacks(zenHideRunnable)
         try {
             unregisterReceiver(pipReceiver)
         } catch (_: Exception) {}
