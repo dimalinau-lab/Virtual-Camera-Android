@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -21,6 +22,10 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.OutputConfiguration
+import com.example.ccamera.gl.CameraGlRenderer
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
@@ -29,11 +34,13 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.hardware.SensorManager
 import android.provider.Settings
 import android.util.Log
 import android.util.Range
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.View
 import android.view.WindowManager
@@ -72,9 +79,19 @@ class FloatingCameraService : Service(),
     private var controlServer: ControlServer? = null
     private var streamer: RawH265Streamer? = null
     private var audioStreamer: AudioStreamer? = null
+    private var glRenderer: CameraGlRenderer? = null
+    @Volatile
+    private var isAutoFraming: Boolean = false
+    val isAutoFramingEnabled: Boolean
+        get() = isAutoFraming
+    val currentCameraFacing: String
+        get() = currentCameraFacingName
+    @Volatile
+    var useGlPipeline: Boolean = false
 
     private var cameraDevice: CameraDevice? = null
     private var cameraCaptureSession: CameraCaptureSession? = null
+    private var cameraCaptureCallback: CameraCaptureSession.CaptureCallback? = null
     private var displaySurface: Surface? = null
     private var activityDisplaySurface: Surface? = null
     private var overlayDisplaySurface: Surface? = null
@@ -99,7 +116,38 @@ class FloatingCameraService : Service(),
 
     private var isTorchOn: Boolean = false
     private var isStreaming: Boolean = false
-    private var currentOrientationMode: String = "vertical"
+    private var isHeatThrottled: Boolean = false
+    private var preHeatFps: Int = 60
+    private var preHeatBitrate: Int = 12_000_000
+
+    private val heatGuardReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
+            val tempTenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
+            val tempC = tempTenths / 10.0f
+            checkHeatGuard(tempC)
+        }
+    }
+
+    private fun checkHeatGuard(tempC: Float) {
+        if (tempC <= 0f) return
+        if (tempC >= 43.5f && !isHeatThrottled) {
+            isHeatThrottled = true
+            preHeatFps = targetFps
+            preHeatBitrate = targetBitrate
+            Log.w(TAG, "[HEAT GUARD] Перегрев батареи: ${tempC}°C >= 43.5°C! Включение термозащиты (FPS -> 30, Bitrate -> 6 Mbps)")
+            val newFps = minOf(targetFps, 30)
+            val newBitrate = minOf(targetBitrate, 6_000_000)
+            if (newFps != targetFps || newBitrate != targetBitrate) {
+                applyStreamConfig(if (targetWidth >= 1920) "1080p" else "720p", newFps, newBitrate)
+            }
+        } else if (tempC <= 40.5f && isHeatThrottled) {
+            isHeatThrottled = false
+            Log.i(TAG, "[HEAT GUARD] Температура нормализована: ${tempC}°C <= 40.5°C. Восстановление исходных параметров: $preHeatFps FPS, $preHeatBitrate bps")
+            applyStreamConfig(if (targetWidth >= 1920) "1080p" else "720p", preHeatFps, preHeatBitrate)
+        }
+    }
+    private var currentOrientationMode: String = "auto"
 
     @Volatile
     private var currentZoomRatio: Float = 1.0f
@@ -107,8 +155,32 @@ class FloatingCameraService : Service(),
     private var currentLensName: String = "1x"
     private var minZoomRatio: Float = 1.0f
     private var maxZoomRatio: Float = 8.0f
+    var ultraWideCameraId: String? = null
+    var ultraWidePhysicalId: String? = null
+    var telePhysicalId: String? = null
+    var teleCameraId: String? = null
+    var hasWideCameraHardware: Boolean = false
+    var activePhysicalCameraId: String? = null
+    var currentExplicitCameraId: String? = null
+    @Volatile
+    var isStabilization: Boolean = false
+    @Volatile
+    var hasOis: Boolean = false
+    @Volatile
+    var hasEis: Boolean = false
+
+    data class CameraUnitInfo(
+        val id: String,
+        val name: String,
+        val type: String,
+        val facing: String,
+        val focalLengthMm: Float,
+        val hasOis: Boolean,
+        val isPhysical: Boolean
+    )
     private var zoomRatioRange: Range<Float>? = null
     private var sensorCropRegion: Rect? = null
+    private var sensorOrientation: Int = 90
     private var currentCaptureRequestBuilder: CaptureRequest.Builder? = null
 
     @Volatile
@@ -130,6 +202,10 @@ class FloatingCameraService : Service(),
 
     @Volatile
     private var currentAwbMode: String = "auto"
+
+    private var activeAfModes: IntArray? = null
+    private var activeAeModes: IntArray? = null
+    private var activeAwbModes: IntArray? = null
 
     private var targetWidth: Int = 1920
     private var targetHeight: Int = 1080
@@ -272,6 +348,8 @@ class FloatingCameraService : Service(),
 
         initControllersIfNeeded()
         startForegroundWithStatus("Ожидание подключения ПК...")
+        registerReceiver(heatGuardReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        startOrientationDetection()
 
         Log.i(TAG, "FloatingCameraService создан, UDP маяк и Foreground запущены")
     }
@@ -623,12 +701,16 @@ class FloatingCameraService : Service(),
                 activeStreamer.reinitCodec(targetWidth, targetHeight, targetFps, targetBitrate)
             }
         }
+        audioStreamer?.audioSink = { pcm, size, ptsUs ->
+            streamer?.enqueueAudio(pcm, size, ptsUs)
+        }
         bindCamera()
     }
 
     fun stopStreamingInternal(isShuttingDown: Boolean = false) {
         isStreaming = false
         isCameraInitialized = false
+        audioStreamer?.audioSink = null
         try {
             audioStreamer?.stop()
         } catch (_: Exception) {}
@@ -663,6 +745,11 @@ class FloatingCameraService : Service(),
         }
         Log.i("ROUTING_DEBUG", "setPreviewDisplaySurface: activitySurface=$surface, overlaySurface=$overlayDisplaySurface, displaySurface=$displaySurface, floating=$isFloatingOverlayEnabled")
 
+        if (glRenderer != null) {
+            glRenderer?.setPreviewSurface(displaySurface)
+            return
+        }
+
         // Если камера уже открыта — безопасно обновляем сессию с новым экраном
         val camera = cameraDevice ?: return
         getCameraHandler().post {
@@ -692,6 +779,12 @@ class FloatingCameraService : Service(),
             cameraDevice?.close()
         } catch (_: Exception) {}
         cameraDevice = null
+
+        try {
+            glRenderer?.release()
+        } catch (_: Exception) {}
+        glRenderer = null
+
         isCameraBusy = false
     }
 
@@ -721,28 +814,47 @@ class FloatingCameraService : Service(),
                     isStreaming = true
                 }
 
+                val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                val targetLensFacing = if (currentCameraFacingName == "back") CameraCharacteristics.LENS_FACING_BACK else CameraCharacteristics.LENS_FACING_FRONT
+                var selectedCameraId: String? = currentExplicitCameraId
+                if (selectedCameraId != null) {
+                    val valid = try { manager.getCameraCharacteristics(selectedCameraId) != null } catch (_: Exception) { false }
+                    if (!valid) {
+                        Log.w("ROUTING_DEBUG", "selectedCameraId $selectedCameraId недоступна в CameraManager, сброс на default")
+                        selectedCameraId = null
+                        currentExplicitCameraId = null
+                    }
+                }
+                if (selectedCameraId == null) {
+                    for (id in manager.cameraIdList) {
+                        val chars = manager.getCameraCharacteristics(id)
+                        if (chars.get(CameraCharacteristics.LENS_FACING) == targetLensFacing) {
+                            if (selectedCameraId == null || (targetLensFacing == CameraCharacteristics.LENS_FACING_BACK && id == "0")) {
+                                selectedCameraId = id
+                            }
+                        }
+                    }
+                }
+                if (selectedCameraId != null) {
+                    val chars = try { manager.getCameraCharacteristics(selectedCameraId) } catch (_: Exception) { null }
+                    val availableFpsRanges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
+                    val effectiveFps = minOf(targetFps, maxSensorFps)
+                    activeMaxFps = maxSensorFps
+                    activeSupportedFps = availableFpsRanges?.map { it.upper }?.distinct()?.sorted() ?: listOf(30)
+                    Log.i("ROUTING_DEBUG", "Выбрана камера $selectedCameraId ($currentCameraFacingName): maxFps=$activeMaxFps, effectiveFps=$effectiveFps, supportedFps=$activeSupportedFps")
+
+                    if (activeStreamer.frameRate != effectiveFps) {
+                        Log.i("ROUTING_DEBUG", "Адаптация MediaCodec под частоту сенсора: ${activeStreamer.frameRate} -> $effectiveFps FPS")
+                        activeStreamer.reinitCodec(targetWidth, targetHeight, effectiveFps, targetBitrate)
+                    }
+                }
+
                 val codecSurf = activeStreamer.inputSurface
                 if (codecSurf == null || !codecSurf.isValid) {
                     Log.e("ROUTING_DEBUG", "codecSurf невалиден в bindCamera")
                     isCameraBusy = false
                     return@post
-                }
-
-                val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                val targetLensFacing = if (currentCameraFacingName == "back") CameraCharacteristics.LENS_FACING_BACK else CameraCharacteristics.LENS_FACING_FRONT
-                var selectedCameraId: String? = null
-                for (id in manager.cameraIdList) {
-                    val chars = manager.getCameraCharacteristics(id)
-                    if (chars.get(CameraCharacteristics.LENS_FACING) == targetLensFacing) {
-                        if (selectedCameraId == null || (targetLensFacing == CameraCharacteristics.LENS_FACING_BACK && id == "0")) {
-                            selectedCameraId = id
-                            val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-                            val maxFps = ranges?.map { it.upper }?.maxOrNull() ?: 30
-                            activeMaxFps = 60
-                            activeSupportedFps = listOf(30, 60)
-                            Log.i("ROUTING_DEBUG", "Выбрана камера $id ($currentCameraFacingName): maxFps=$activeMaxFps, supportedFps=$activeSupportedFps")
-                        }
-                    }
                 }
 
                 if (selectedCameraId != null && ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -751,6 +863,7 @@ class FloatingCameraService : Service(),
                             Log.i("ROUTING_DEBUG", "Camera2 openCamera onOpened: id=${camera.id}")
                             cameraDevice = camera
                             isCameraBusy = false
+                            isSwitching = false
                             startCamera2Session(camera)
                         }
 
@@ -758,21 +871,31 @@ class FloatingCameraService : Service(),
                             Log.w("ROUTING_DEBUG", "Camera2 openCamera onDisconnected")
                             closeCameraSync()
                             isCameraBusy = false
+                            isSwitching = false
                         }
 
                         override fun onError(camera: CameraDevice, error: Int) {
-                            Log.e("ROUTING_DEBUG", "Camera2 openCamera onError: $error")
+                            Log.e("ROUTING_DEBUG", "Camera2 openCamera onError: $error (id=${camera.id})")
                             closeCameraSync()
                             isCameraBusy = false
+                            isSwitching = false
+                            if (camera.id != "0" && currentCameraFacingName == "back") {
+                                Log.w("ROUTING_DEBUG", "Попытка мягкого восстановления на основную камеру ID 0")
+                                currentExplicitCameraId = null
+                                activePhysicalCameraId = null
+                                getCameraHandler().postDelayed({ bindCamera() }, 300)
+                            }
                         }
                     }, getCameraHandler())
                 } else {
                     Log.e("ROUTING_DEBUG", "selectedCameraId null или нет разрешения CAMERA")
                     isCameraBusy = false
+                    isSwitching = false
                 }
             } catch (e: Exception) {
                 Log.e("ROUTING_DEBUG", "Ошибка bindCamera Camera2: ", e)
                 isCameraBusy = false
+                isSwitching = false
             }
         }
     }
@@ -790,16 +913,40 @@ class FloatingCameraService : Service(),
 
         try {
             val surfaces = mutableListOf<Surface>()
-            if (codecSurface.isValid) {
-                surfaces.add(codecSurface)
-            }
+            if (isAutoFramingEnabled || useGlPipeline) {
+                try {
+                    glRenderer?.release()
+                } catch (_: Exception) {}
+                val renderer = CameraGlRenderer(targetWidth, targetHeight, codecSurface)
+                renderer.setOrientation(streamOrientation())
+                renderer.isFrontCamera = (currentCameraFacingName == "front")
+                renderer.autoFraming.isEnabled = isAutoFramingEnabled
+                renderer.setPreviewSurface(displaySurface)
+                glRenderer = renderer
 
-            val dispSurf = displaySurface
-            if (dispSurf != null && dispSurf.isValid) {
-                surfaces.add(dispSurf)
-                Log.i("ROUTING_DEBUG", "Добавлена поверхность локального видоискателя ($dispSurf)")
+                val camTarget = renderer.cameraSurface
+                if (camTarget != null && camTarget.isValid) {
+                    surfaces.add(camTarget)
+                    Log.i("ROUTING_DEBUG", "Пайплайн OpenGL ES: добавлен SurfaceTexture таргет ($camTarget)")
+                } else {
+                    surfaces.add(codecSurface)
+                }
             } else {
-                Log.w("ROUTING_DEBUG", "displaySurface null или невалиден: $dispSurf")
+                try {
+                    glRenderer?.release()
+                } catch (_: Exception) {}
+                glRenderer = null
+
+                if (codecSurface.isValid) {
+                    surfaces.add(codecSurface)
+                    Log.i("ROUTING_DEBUG", "Пайплайн Direct Surface: прямой вывод в кодек ($codecSurface)")
+                }
+                val dispSurf = displaySurface
+                // Для физического потока камеры (activePhysicalCameraId) нельзя добавлять второй Surface, так как HAL физической камеры ограничен 1 Surface
+                if (activePhysicalCameraId == null && dispSurf != null && dispSurf.isValid) {
+                    surfaces.add(dispSurf)
+                    Log.i("ROUTING_DEBUG", "Добавлена поверхность локального видоискателя ($dispSurf)")
+                }
             }
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
@@ -809,15 +956,22 @@ class FloatingCameraService : Service(),
 
             val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val chars = manager.getCameraCharacteristics(camera.id)
+            sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (currentCameraFacingName == "front") 270 else 90)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (activePhysicalCameraId != null) {
+                minZoomRatio = 1.0f
+                maxZoomRatio = 1.0f
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) != null) {
                 zoomRatioRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
-                if (zoomRatioRange != null) {
-                    minZoomRatio = zoomRatioRange!!.lower
-                    maxZoomRatio = zoomRatioRange!!.upper
-                    Log.i("ROUTING_DEBUG", "Аппаратный диапазон зума (API 30+): [$minZoomRatio, $maxZoomRatio]")
-                }
+                minZoomRatio = zoomRatioRange!!.lower
+                maxZoomRatio = zoomRatioRange!!.upper
+            } else {
+                zoomRatioRange = null
+                minZoomRatio = 1.0f
+                maxZoomRatio = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
             }
+            currentZoomRatio = currentZoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+            Log.i("ROUTING_DEBUG", "Аппаратный диапазон зума: [$minZoomRatio, $maxZoomRatio], текущий=$currentZoomRatio")
             sensorCropRegion = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
                 minIso = it.lower
@@ -831,16 +985,28 @@ class FloatingCameraService : Service(),
                 maxFocusDistance = it
             }
 
+            activeAfModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+            activeAeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
+            activeAwbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
+
+            if (currentCameraFacingName == "front") {
+                currentZoomRatio = 1.0f
+            }
             currentCaptureRequestBuilder = builder
             applyZoomToBuilder(builder)
             applyManualControlsToBuilder(builder)
 
-            val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            val targetChars = if (activePhysicalCameraId != null) {
+                try { manager.getCameraCharacteristics(activePhysicalCameraId!!) } catch (_: Exception) { chars }
+            } else chars
+            val availableFpsRanges = targetChars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             val maxSensorFps = availableFpsRanges?.map { it.upper }?.maxOrNull() ?: 30
-            activeMaxFps = 60
-            activeSupportedFps = listOf(30, 60)
+            val effectiveFps = if (activePhysicalCameraId != null) minOf(30, maxSensorFps) else minOf(targetFps, maxSensorFps)
+            activeMaxFps = maxSensorFps
+            activeSupportedFps = availableFpsRanges?.map { it.upper }?.distinct()?.sorted() ?: listOf(30)
 
-            val selectedRange = if (targetFps >= 60) {
+
+            val selectedRange = if (effectiveFps >= 60) {
                 // Priority 1: Exact fixed 60 FPS range [60, 60] (prevents AE from dropping to 30 in low light)
                 availableFpsRanges?.firstOrNull { it.lower == 60 && it.upper == 60 }
                     ?: availableFpsRanges?.firstOrNull { it.lower >= 60 && it.upper >= 60 }
@@ -850,20 +1016,36 @@ class FloatingCameraService : Service(),
                     ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
                     ?: Range(30, 30)
             } else {
-                availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
+                availableFpsRanges?.firstOrNull { it.lower == effectiveFps && it.upper == effectiveFps }
+                    ?: availableFpsRanges?.firstOrNull { it.upper == effectiveFps }
+                    ?: availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
                     ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
                     ?: Range(30, 30)
             }
             activeFpsRangeStr = selectedRange.toString()
-            Log.i("ROUTING_DEBUG", "[Camera2] FPS: camera=$currentCameraFacingName (id=${camera.id}), targetFps=$targetFps, maxSensorFps=$maxSensorFps, selectedRange=$selectedRange, available=${availableFpsRanges?.toList()}")
+            Log.i("ROUTING_DEBUG", "[Camera2] FPS: camera=$currentCameraFacingName (id=${camera.id}, physId=$activePhysicalCameraId), targetFps=$targetFps, effectiveFps=$effectiveFps, maxSensorFps=$maxSensorFps, selectedRange=$selectedRange")
 
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
             builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CameraMetadata.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectedRange)
-            builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
+            val faceDetectModes = chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES)
+            val canDetectFaces = faceDetectModes?.contains(CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) == true
+            if (isAutoFramingEnabled && canDetectFaces) {
+                builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE)
+            } else {
+                builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
+            }
+            val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            hasOis = oisModes?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+            val eisModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+            hasEis = eisModes?.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
+
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+            val stabOis = if (isStabilization && hasOis) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+            val stabEis = if (isStabilization && hasEis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, stabOis)
+            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, stabEis)
+            Log.i("ROUTING_DEBUG", "[Stabilization] Applied to session: OIS=$stabOis (avail=$hasOis), EIS=$stabEis (avail=$hasEis), isStabilization=$isStabilization")
             builder.set(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
             builder.set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -876,13 +1058,37 @@ class FloatingCameraService : Service(),
                 builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             }
 
-            @Suppress("DEPRECATION")
-            camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+            val sessionCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     cameraCaptureSession = session
+                    val callback = object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            result: TotalCaptureResult
+                        ) {
+                            if (isAutoFramingEnabled) {
+                                val faces = result.get(CaptureResult.STATISTICS_FACES)
+                                val isFront = (currentCameraFacingName == "front")
+                                glRenderer?.autoFraming?.onFacesDetected(faces, sensorCropRegion, streamOrientation(), isFront)
+                            }
+                        }
+                    }
+                    cameraCaptureCallback = callback
                     try {
-                        session.setRepeatingRequest(builder.build(), null, getCameraHandler())
-                        Log.i("ROUTING_DEBUG", "Сессия запущена с таргетами: surfaces.size = ${surfaces.size} (экран + кодек)")
+                        session.setRepeatingRequest(builder.build(), callback, getCameraHandler())
+                        Log.i("ROUTING_DEBUG", "Сессия запущена с таргетами: surfaces.size = ${surfaces.size} (экран + кодек), physId=$activePhysicalCameraId")
+                        val orient = streamOrientation()
+                        val isLand = (orient == 0 || orient == 180)
+                        val statusJson = org.json.JSONObject()
+                            .put("orient", orient)
+                            .put("orientation", if (isLand) "horizontal" else "vertical")
+                            .put("facing", currentCameraFacingName)
+                            .put("width", targetWidth)
+                            .put("height", targetHeight)
+                            .put("fps", selectedRange.upper)
+                            .toString()
+                        streamer?.enqueueStatus(statusJson)
                         streamer?.requestSyncFrame()
                     } catch (e: Exception) {
                         Log.e("ROUTING_DEBUG", "Ошибка setRepeatingRequest: ", e)
@@ -890,18 +1096,165 @@ class FloatingCameraService : Service(),
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    Log.e("ROUTING_DEBUG", "Ошибка конфигурации сессии")
+                    Log.e("ROUTING_DEBUG", "Ошибка конфигурации сессии (physId=$activePhysicalCameraId)")
+                    if (activePhysicalCameraId != null) {
+                        Log.w("ROUTING_DEBUG", "Откат с физической сессии на логическую камеру 0")
+                        activePhysicalCameraId = null
+                        val cam = cameraDevice
+                        if (cam != null) {
+                            getCameraHandler().postDelayed({ startCamera2Session(cam) }, 200)
+                        }
+                    }
                 }
-            }, getCameraHandler())
+            }
+
+            if (activePhysicalCameraId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val outputConfigs = surfaces.map { s ->
+                    OutputConfiguration(s).apply {
+                        setPhysicalCameraId(activePhysicalCameraId)
+                    }
+                }
+                camera.createCaptureSessionByOutputConfigurations(outputConfigs, sessionCallback, getCameraHandler())
+            } else {
+                @Suppress("DEPRECATION")
+                camera.createCaptureSession(surfaces, sessionCallback, getCameraHandler())
+            }
         } catch (e: Exception) {
             Log.e("ROUTING_DEBUG", "Ошибка создания Camera2 сессии: ", e)
         }
     }
 
+    private fun restartCameraSessionWithPhysicalId(physId: String?) {
+        val camera = cameraDevice ?: return
+        getCameraHandler().post {
+            try {
+                startCamera2Session(camera)
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "Ошибка restartCameraSessionWithPhysicalId: ", e)
+            }
+        }
+    }
+
+    private var orientationListener: OrientationEventListener? = null
+
+    fun setOrientation(mode: String) {
+        setOrientationInternal(mode)
+    }
+
     private fun setOrientationInternal(mode: String) {
-        val normalized = if (mode.contains("horiz") || mode.contains("land")) "horizontal" else "vertical"
+        val normalized = when {
+            mode == "auto" -> "auto"
+            mode.contains("horiz") || mode.contains("land") -> "horizontal"
+            else -> "vertical"
+        }
         currentOrientationMode = normalized
-        Log.i("ROUTING_DEBUG", "Ориентация установлена: $normalized")
+        val orient = streamOrientation()
+        glRenderer?.setOrientation(orient)
+        val isLand = (orient == 0 || orient == 180)
+        val json = org.json.JSONObject()
+            .put("orient", orient)
+            .put("orientation", if (isLand) "horizontal" else "vertical")
+            .toString()
+        streamer?.enqueueStatus(json)
+        streamer?.requestKeyFrame()
+        Log.i("ROUTING_DEBUG", "Ориентация установлена: $normalized, streamOrient=$orient")
+    }
+
+    private var deviceOrientationDegrees = 0
+
+    fun streamOrientation(): Int {
+        val dev = when (currentOrientationMode) {
+            "horizontal" -> return 0
+            "vertical" -> 0
+            else -> deviceOrientationDegrees
+        }
+        val isFront = (currentCameraFacingName == "front")
+        val sensor = if (isFront) 270 else 90
+        return if (isFront) (sensor - dev + 360) % 360 else (sensor + dev) % 360
+    }
+
+    fun startOrientationDetection() {
+        if (orientationListener != null) return
+        try {
+            orientationListener = object : OrientationEventListener(this, SensorManager.SENSOR_DELAY_NORMAL) {
+                override fun onOrientationChanged(degrees: Int) {
+                    if (degrees == ORIENTATION_UNKNOWN) return
+                    val cur = deviceOrientationDegrees
+                    var diff = Math.abs(degrees - cur) % 360
+                    if (diff > 180) diff = 360 - diff
+                    if (diff < 50) return // гистерезис 50°
+                    val snapped = ((degrees + 45) / 90 * 90) % 360
+                    if (snapped != cur) {
+                        deviceOrientationDegrees = snapped
+                        val orient = streamOrientation()
+                        glRenderer?.setOrientation(orient)
+                        val isLandscape = (orient == 0 || orient == 180)
+                        val statusJson = org.json.JSONObject()
+                            .put("orient", orient)
+                            .put("orientation", if (isLandscape) "horizontal" else "vertical")
+                            .put("facing", currentCameraFacingName)
+                            .put("width", targetWidth)
+                            .put("height", targetHeight)
+                            .put("fps", targetFps)
+                            .toString()
+                        streamer?.enqueueStatus(statusJson)
+                        streamer?.requestKeyFrame()
+                        Log.i("ROUTING_DEBUG", "[Sensor] Авто-ориентация телефона: snapped=$snapped°, orient=$orient ($degrees°)")
+                    }
+                }
+            }.apply {
+                if (canDetectOrientation()) {
+                    enable()
+                    Log.i("ROUTING_DEBUG", "OrientationEventListener успешно запущен")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("ROUTING_DEBUG", "Не удалось запустить датчик ориентации", e)
+        }
+    }
+
+    fun stopOrientationDetection() {
+        try {
+            orientationListener?.disable()
+        } catch (_: Exception) {}
+        orientationListener = null
+    }
+
+    fun setAutoFramingEnabled(enabled: Boolean) {
+        if (isAutoFraming == enabled) return
+        isAutoFraming = enabled
+
+        if (!enabled) {
+            glRenderer?.autoFraming?.reset()
+        } else {
+            glRenderer?.autoFraming?.isEnabled = true
+        }
+
+        currentCaptureRequestBuilder?.let { b ->
+            val faceMode = if (enabled) CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE else CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
+            b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, faceMode)
+            try {
+                cameraCaptureCallback?.let { cb ->
+                    cameraCaptureSession?.setRepeatingRequest(b.build(), cb, getCameraHandler())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Ошибка переключения детекции лиц", e)
+            }
+        }
+        if (enabled && glRenderer == null) {
+            rebindResolutionOnly(targetWidth, targetHeight)
+        } else if (!enabled && !useGlPipeline && glRenderer != null) {
+            rebindResolutionOnly(targetWidth, targetHeight)
+        }
+        Log.i("ROUTING_DEBUG", "Auto-Framing переключен: $enabled")
+    }
+
+    fun setPipelineMode(mode: String) {
+        val gl = mode.lowercase() == "gl" || mode.lowercase() == "opengl"
+        if (useGlPipeline == gl) return
+        useGlPipeline = gl
+        rebindResolutionOnly(targetWidth, targetHeight)
+        Log.i("ROUTING_DEBUG", "Режим пайплайна переключен: mode=$mode, useGlPipeline=$useGlPipeline")
     }
 
     // --- ControlServer.ControlCallback ---
@@ -956,22 +1309,218 @@ class FloatingCameraService : Service(),
                     val mode = params.optString("mode", "auto")
                     setAwbMode(mode)
                 }
+                "toggle_auto_framing" -> setAutoFramingEnabled(!isAutoFramingEnabled)
+                "set_auto_framing" -> {
+                    val enabled = params.optBoolean("enabled", !isAutoFramingEnabled)
+                    setAutoFramingEnabled(enabled)
+                }
+                "set_pipeline_mode" -> {
+                    val mode = params.optString("mode", "gl")
+                    setPipelineMode(mode)
+                }
+                "toggle_stabilization" -> setStabilizationEnabled(!isStabilization)
+                "set_stabilization" -> {
+                    val enabled = params.optBoolean("enabled", !isStabilization)
+                    setStabilizationEnabled(enabled)
+                }
+                "set_camera_unit" -> {
+                    val unitId = params.optString("id", "")
+                    val isPhys = params.optBoolean("is_physical", false)
+                    if (unitId.isNotBlank()) {
+                        setCameraUnit(unitId, isPhys)
+                    }
+                }
             }
         }
     }
 
+    private var cachedAvailableLenses: List<String>? = null
+
+    fun getAvailableLenses(forceRefresh: Boolean = false): List<String> {
+        if (!forceRefresh && cachedAvailableLenses != null) {
+            return cachedAvailableLenses!!
+        }
+        val lenses = mutableListOf<String>()
+        try {
+            val manager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            var hasWide = (minZoomRatio <= 0.75f)
+            var hasTele2 = (maxZoomRatio >= 1.9f)
+            var hasTele3 = (maxZoomRatio >= 2.9f)
+            var hasTele5 = (maxZoomRatio >= 4.9f)
+            var hasTele10 = (maxZoomRatio >= 9.9f)
+
+            if (manager != null) {
+                // 1. Аппаратные характеристики Camera 0
+                val back0 = try { manager.getCameraCharacteristics("0") } catch (_: Exception) { null }
+                if (back0 != null) {
+                    val focals0 = back0.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    if (focals0 != null && focals0.any { it < 3.2f }) hasWide = true
+                    if (focals0 != null && focals0.any { it > 6.0f }) hasTele3 = true
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        val zRange = back0.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                        if (zRange != null) {
+                            if (zRange.lower <= 0.75f) hasWide = true
+                            if (zRange.upper >= 1.9f) hasTele2 = true
+                            if (zRange.upper >= 2.9f) hasTele3 = true
+                            if (zRange.upper >= 4.9f) hasTele5 = true
+                            if (zRange.upper >= 9.9f) hasTele10 = true
+                        }
+                    }
+                    val maxDig = back0.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
+                    if (maxDig >= 1.9f) hasTele2 = true
+                    if (maxDig >= 2.9f) hasTele3 = true
+                    if (maxDig >= 4.9f) hasTele5 = true
+                }
+
+                // 2. Сканируем список cameraIdList и потенциальные скрытые aux-камеры (0..32, vendor IDs)
+                val candidateIds = linkedSetOf<String>()
+                candidateIds.addAll(manager.cameraIdList)
+                for (i in 0..32) { candidateIds.add(i.toString()) }
+                candidateIds.addAll(listOf("20", "21", "22", "23", "50", "51", "52", "53", "54"))
+
+                for (id in candidateIds) {
+                    val ch = try { manager.getCameraCharacteristics(id) } catch (_: Exception) { continue }
+                    val facing = ch.get(CameraCharacteristics.LENS_FACING)
+                    if (facing != CameraCharacteristics.LENS_FACING_FRONT) {
+                        val focal = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+                        val phys = ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                        val diag = if (phys != null && phys.width > 0f && phys.height > 0f) {
+                            Math.sqrt((phys.width * phys.width + phys.height * phys.height).toDouble()).toFloat()
+                        } else 0f
+                        val eq = if (focal != null && diag > 0f) focal * 43.27f / diag else 0f
+
+                        if (id != "0") {
+                            if ((focal != null && focal < 2.0f) || (eq in 10f..20f)) {
+                                hasWide = true
+                                hasWideCameraHardware = true
+                                ultraWideCameraId = id
+                                Log.i("ROUTING_DEBUG", "[Lens] Обнаружен ширик: id=$id, focal=$focal, eq=${eq}mm, inList=${manager.cameraIdList.contains(id)}")
+                            } else if (focal != null && focal in 2.0f..3.2f) {
+                                Log.i("ROUTING_DEBUG", "[Lens] Обнаружен макро-модуль: id=$id, focal=$focal, eq=${eq}mm")
+                            } else if (eq in 45f..70f) {
+                                hasTele2 = true
+                            } else if ((focal != null && focal > 6.0f) || eq in 71f..110f) {
+                                hasTele3 = true
+                                teleCameraId = id
+                                Log.i("ROUTING_DEBUG", "[Lens] Обнаружен телевик: id=$id, focal=$focal, eq=${eq}mm")
+                            } else if (eq > 110f) {
+                                hasTele5 = true
+                            }
+                        }
+
+                        // Samsung / Xiaomi Multi-Camera: физические модули (physicalCameraIds)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            for (pid in ch.physicalCameraIds) {
+                                val pch = try { manager.getCameraCharacteristics(pid) } catch (_: Exception) { continue }
+                                val pfocal = pch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+                                val pphys = pch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                                val pdiag = if (pphys != null && pphys.width > 0f && pphys.height > 0f) {
+                                    Math.sqrt((pphys.width * pphys.width + pphys.height * pphys.height).toDouble()).toFloat()
+                                } else 0f
+                                val peq = if (pfocal != null && pdiag > 0f) pfocal * 43.27f / pdiag else 0f
+
+                                if ((pfocal != null && pfocal < 3.2f) || (peq in 10f..22f)) {
+                                    hasWide = true
+                                    ultraWidePhysicalId = pid
+                                    Log.i("ROUTING_DEBUG", "[Samsung Lens] Обнаружен физический ширик: pid=$pid, focal=$pfocal, eq=${peq}mm")
+                                } else if ((pfocal != null && pfocal > 6.0f) || peq in 71f..110f) {
+                                    hasTele3 = true
+                                    telePhysicalId = pid
+                                    Log.i("ROUTING_DEBUG", "[Samsung Lens] Обнаружен физический телевик: pid=$pid, focal=$pfocal, eq=${peq}mm")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            lenses.add("0.5x")
+            lenses.add("1x")
+            if (hasTele2) lenses.add("2x")
+            if (hasTele3) lenses.add("3x")
+            if (hasTele5) lenses.add("5x")
+            if (hasTele10) lenses.add("10x")
+            Log.i("ROUTING_DEBUG", "getAvailableLenses -> $lenses (hasWide=$hasWide, ultraWideCam=$ultraWideCameraId, teleCam=$teleCameraId, ultraWidePhys=$ultraWidePhysicalId, telePhys=$telePhysicalId)")
+            cachedAvailableLenses = lenses
+            return lenses
+        } catch (e: Exception) {
+            Log.w("ROUTING_DEBUG", "getAvailableLenses error", e)
+        }
+        val fallback = listOf("0.5x", "1x", "2x")
+        cachedAvailableLenses = fallback
+        return fallback
+    }
+
     private fun applyZoomToBuilder(builder: CaptureRequest.Builder) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && zoomRatioRange != null) {
-                val clamped = currentZoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
-                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, clamped)
+            if (activePhysicalCameraId != null) {
+                return
+            }
+
+            // На ширике (<= 0.75x) на Galaxy A34 (MediaTek Dimensity) сенсор аппаратно поддерживает максимум 30 FPS.
+            // Если оставить фиксированный диапазон 60 FPS, ISP драйвер ширика зависает.
+            // Поэтому на зуме <= 0.75x адаптируем FPS-диапазон под безопасные 30 FPS:
+            val manager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            val chars = if (cameraDevice != null && manager != null) {
+                try { manager.getCameraCharacteristics(cameraDevice!!.id) } catch (_: Exception) { null }
+            } else null
+            val availableFpsRanges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+
+            if (currentZoomRatio <= 0.75f) {
+                val safe30Range = availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
+                    ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
+                    ?: availableFpsRanges?.firstOrNull { it.upper <= 30 }
+                    ?: Range(15, 30)
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, safe30Range)
+            } else {
+                val effectiveFps = minOf(targetFps, activeMaxFps)
+                val normalRange = if (effectiveFps >= 60) {
+                    availableFpsRanges?.firstOrNull { it.lower == 60 && it.upper == 60 }
+                        ?: availableFpsRanges?.firstOrNull { it.lower >= 30 && it.upper >= 60 }
+                        ?: availableFpsRanges?.firstOrNull { it.upper >= 60 }
+                        ?: Range(30, 30)
+                } else {
+                    availableFpsRanges?.firstOrNull { it.lower == effectiveFps && it.upper == effectiveFps }
+                        ?: availableFpsRanges?.firstOrNull { it.upper == effectiveFps }
+                        ?: Range(30, 30)
+                }
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, normalRange)
+            }
+
+            if (currentZoomRatio < 1.0f) {
+                try {
+                    val samsungZoomKey = CaptureRequest.Key("samsung.android.scaler.zoomRatio", java.lang.Float::class.java)
+                    builder.set(samsungZoomKey, currentZoomRatio as java.lang.Float)
+                } catch (_: Exception) {}
+                try {
+                    val samsungZoomKey2 = CaptureRequest.Key("com.samsung.android.control.zoomratio", java.lang.Float::class.java)
+                    builder.set(samsungZoomKey2, currentZoomRatio as java.lang.Float)
+                } catch (_: Exception) {}
+                try {
+                    val samsungZoomKey3 = CaptureRequest.Key("samsung.android.scaler.zoomMapRatio", java.lang.Integer::class.java)
+                    builder.set(samsungZoomKey3, (currentZoomRatio * 1000).toInt() as java.lang.Integer)
+                } catch (_: Exception) {}
+                try {
+                    val samsungZoomKey4 = CaptureRequest.Key("com.samsung.android.scaler.zoomMapRatio", java.lang.Integer::class.java)
+                    builder.set(samsungZoomKey4, (currentZoomRatio * 1000).toInt() as java.lang.Integer)
+                } catch (_: Exception) {}
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, currentZoomRatio)
+                } catch (_: Exception) {
+                    if (zoomRatioRange != null) {
+                        val clampedForApi = currentZoomRatio.coerceIn(zoomRatioRange!!.lower, zoomRatioRange!!.upper)
+                        builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, clampedForApi)
+                    }
+                }
             } else {
                 sensorCropRegion?.let { activeArray ->
-                    val clamped = currentZoomRatio.coerceAtLeast(1.0f)
+                    val clamped = currentZoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
                     val cropW = (activeArray.width() / clamped).toInt()
                     val cropH = (activeArray.height() / clamped).toInt()
-                    val cropX = (activeArray.width() - cropW) / 2
-                    val cropY = (activeArray.height() - cropH) / 2
+                    val cropX = activeArray.left + (activeArray.width() - cropW) / 2
+                    val cropY = activeArray.top + (activeArray.height() - cropH) / 2
                     builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(cropX, cropY, cropX + cropW, cropY + cropH))
                 }
             }
@@ -981,23 +1530,67 @@ class FloatingCameraService : Service(),
     }
 
     fun setZoomRatio(ratio: Float) {
-        val clamped = ratio.coerceIn(minZoomRatio, maxZoomRatio)
+        val effectiveMin = if (hasWideCameraHardware || ultraWideCameraId != null || (zoomRatioRange != null && zoomRatioRange!!.lower <= 0.75f)) 0.5f else minZoomRatio
+        val clamped = ratio.coerceIn(effectiveMin, maxZoomRatio)
         currentZoomRatio = clamped
-        Log.i("ROUTING_DEBUG", "Установка zoomRatio = $clamped (диапазон [$minZoomRatio, $maxZoomRatio])")
+        currentLensName = when {
+            clamped <= 0.75f -> "0.5x"
+            clamped < 1.8f -> "1x"
+            clamped < 2.8f -> "2x"
+            clamped < 4.5f -> "3x"
+            clamped < 8.0f -> "5x"
+            else -> "${clamped.toInt()}x"
+        }
+        Log.i("ROUTING_DEBUG", "Установка zoomRatio = $clamped (диапазон [$effectiveMin, $maxZoomRatio]), lens=$currentLensName")
         applyZoomToSession()
     }
 
     fun setLens(lens: String) {
         currentLensName = lens
         Log.i("ROUTING_DEBUG", "Запрос смены линзы: $lens")
-        val targetRatio = when (lens.lowercase()) {
-            "0.5x" -> {
-                if (minZoomRatio < 1.0f) minOf(0.5f, minZoomRatio) else 1.0f
+        if (lens.lowercase() == "0.5x") {
+            currentLensName = "0.5x"
+            currentZoomRatio = 0.5f
+
+            // Если были на фронталке или другой камере, возвращаемся на основную Камеру 0
+            if (currentCameraFacingName != "back" || currentExplicitCameraId != null) {
+                currentCameraFacingName = "back"
+                currentExplicitCameraId = null
+                activePhysicalCameraId = null
+                bindCamera()
+                return
             }
+
+            // Бесшовный переход на ширик внутри открытой сессии Камеры 0 (без деструктивного openCamera)
+            applyZoomToSession()
+            Log.i("ROUTING_DEBUG", "0.5x применен через бесшовный аппаратный зум 0.5x в сессии Камеры 0")
+            return
+        }
+
+        // Если переключаемся с ширика обратно на 1x, 2x, 3x и была открыта отдельная камера,
+        // возвращаемся на основную камеру "0"
+        if (currentExplicitCameraId != null) {
+            currentExplicitCameraId = null
+            currentCameraFacingName = "back"
+            bindCamera()
+        }
+
+        if (activePhysicalCameraId != null) {
+            activePhysicalCameraId = null
+            useGlPipeline = false
+            restartCameraSessionWithPhysicalId(null)
+        }
+
+        val targetRatio = when (lens.lowercase()) {
             "1x" -> 1.0f
             "2x" -> minOf(2.0f, maxZoomRatio)
             "3x" -> minOf(3.0f, maxZoomRatio)
-            else -> 1.0f
+            "5x" -> minOf(5.0f, maxZoomRatio)
+            "10x" -> minOf(10.0f, maxZoomRatio)
+            else -> {
+                val parsed = lens.replace("x", "", ignoreCase = true).trim().toFloatOrNull() ?: 1.0f
+                parsed.coerceIn(minZoomRatio, maxZoomRatio)
+            }
         }
         setZoomRatio(targetRatio)
     }
@@ -1008,8 +1601,9 @@ class FloatingCameraService : Service(),
         getCameraHandler().post {
             try {
                 applyZoomToBuilder(builder)
-                session.setRepeatingRequest(builder.build(), null, getCameraHandler())
+                session.setRepeatingRequest(builder.build(), cameraCaptureCallback, getCameraHandler())
                 Log.i("ROUTING_DEBUG", "Зум успешно применен в активной сессии: ratio=$currentZoomRatio, lens=$currentLensName")
+                streamer?.requestSyncFrame()
             } catch (e: Exception) {
                 Log.e("ROUTING_DEBUG", "Ошибка applyZoomToSession: ", e)
             }
@@ -1026,11 +1620,21 @@ class FloatingCameraService : Service(),
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
             }
 
+            val afModes = activeAfModes ?: intArrayOf()
             if (isManualFocus) {
-                builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
-                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, currentFocusDistance.coerceIn(0.0f, maxFocusDistance))
+                if (afModes.contains(CameraMetadata.CONTROL_AF_MODE_OFF)) {
+                    builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                    builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, currentFocusDistance.coerceIn(0.0f, maxFocusDistance))
+                }
             } else {
-                builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                val targetAf = when {
+                    afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) -> CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                    afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE) -> CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    afModes.contains(CameraMetadata.CONTROL_AF_MODE_AUTO) -> CameraMetadata.CONTROL_AF_MODE_AUTO
+                    afModes.contains(CameraMetadata.CONTROL_AF_MODE_OFF) -> CameraMetadata.CONTROL_AF_MODE_OFF
+                    else -> afModes.firstOrNull() ?: CameraMetadata.CONTROL_AF_MODE_OFF
+                }
+                builder.set(CaptureRequest.CONTROL_AF_MODE, targetAf)
             }
 
             when (currentAwbMode.lowercase()) {
@@ -1096,6 +1700,233 @@ class FloatingCameraService : Service(),
         }
     }
 
+    fun setStabilizationEnabled(enabled: Boolean) {
+        isStabilization = enabled
+        Log.i("ROUTING_DEBUG", "Установка стабилизации: $enabled (hasOis=$hasOis, hasEis=$hasEis)")
+        val session = cameraCaptureSession ?: return
+        val builder = currentCaptureRequestBuilder ?: return
+        getCameraHandler().post {
+            try {
+                val oisVal = if (enabled && hasOis) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                val eisVal = if (enabled && hasEis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, oisVal)
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisVal)
+                session.setRepeatingRequest(builder.build(), cameraCaptureCallback, getCameraHandler())
+                val statusJson = org.json.JSONObject()
+                    .put("stabilization", isStabilization)
+                    .put("has_ois", hasOis)
+                    .put("has_eis", hasEis)
+                    .toString()
+                streamer?.enqueueStatus(statusJson)
+                Log.i("ROUTING_DEBUG", "Стабилизация успешно применена в активной сессии: $enabled (OIS=$oisVal, EIS=$eisVal)")
+            } catch (e: Exception) {
+                Log.e("ROUTING_DEBUG", "Ошибка применения стабилизации: ", e)
+            }
+        }
+    }
+
+    private var cachedCameraUnits: List<CameraUnitInfo>? = null
+
+    fun getAllCameraUnits(forceRefresh: Boolean = false): List<CameraUnitInfo> {
+        if (!forceRefresh && cachedCameraUnits != null) {
+            return cachedCameraUnits!!
+        }
+        val units = mutableListOf<CameraUnitInfo>()
+        try {
+            val manager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return emptyList()
+
+            // 1. Характеристики основной задней камеры (ID 0)
+            val backCh = try { manager.getCameraCharacteristics("0") } catch (_: Exception) { null }
+            val backOisModes = backCh?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            val backHasOis = backOisModes?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+            val backFocals = backCh?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            val mainFocal = backFocals?.firstOrNull() ?: 26.0f
+
+            // Аппаратный зум Camera 0
+            val backZoomRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                backCh?.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            } else null
+            val effectiveMinZoom = backZoomRange?.lower ?: minZoomRatio
+            val backMaxDig = backCh?.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 8.0f
+            val effectiveMaxZoom = backZoomRange?.upper ?: (if (maxZoomRatio > 1.0f) maxZoomRatio else backMaxDig)
+            val availableBackLenses = getAvailableLenses()
+
+            // А. Сверхширокоугольная камера (0.5x Ultra-Wide) - логическая линза
+            val ultraFocal = backFocals?.firstOrNull { it < 3.2f } ?: (mainFocal * 0.5f)
+            units.add(CameraUnitInfo(
+                id = "0.5x",
+                name = "0.5x Ultra-Wide",
+                type = "ultra_wide",
+                facing = "back",
+                focalLengthMm = ultraFocal,
+                hasOis = false,
+                isPhysical = false
+            ))
+
+            // Б. Основная камера (1.0x Main)
+            units.add(CameraUnitInfo(
+                id = "0",
+                name = "1.0x Main",
+                type = "wide",
+                facing = "back",
+                focalLengthMm = mainFocal,
+                hasOis = backHasOis,
+                isPhysical = false
+            ))
+
+            // В. Телефото 2.0x (Телевик 2x)
+            val hasTele2 = availableBackLenses.contains("2x") || effectiveMaxZoom >= 1.9f
+            val hasTele3 = availableBackLenses.contains("3x") || telePhysicalId != null || teleCameraId != null || effectiveMaxZoom >= 2.9f || (backFocals != null && backFocals.any { it > 6.0f })
+
+            if (hasTele2) {
+                units.add(CameraUnitInfo(
+                    id = "lens_2x",
+                    name = "2.0x Tele",
+                    type = "tele",
+                    facing = "back",
+                    focalLengthMm = mainFocal * 2.0f,
+                    hasOis = backHasOis,
+                    isPhysical = false
+                ))
+            }
+
+            // Г. Телефото 3.0x (Телевик 3x)
+            if (hasTele3) {
+                val teleFocal = backFocals?.firstOrNull { it > 6.0f } ?: (mainFocal * 3.0f)
+                units.add(CameraUnitInfo(
+                    id = "lens_3x",
+                    name = "3.0x Tele",
+                    type = "tele",
+                    facing = "back",
+                    focalLengthMm = teleFocal,
+                    hasOis = backHasOis,
+                    isPhysical = false
+                ))
+            }
+
+            // Д. Перископ 5.0x / 10x
+            if (availableBackLenses.contains("5x") || effectiveMaxZoom >= 4.9f) {
+                units.add(CameraUnitInfo(
+                    id = "lens_5x",
+                    name = "5.0x Periscope",
+                    type = "tele",
+                    facing = "back",
+                    focalLengthMm = mainFocal * 5.0f,
+                    hasOis = backHasOis,
+                    isPhysical = false
+                ))
+            }
+
+            // Е. Физически открываемые камеры строго из manager.cameraIdList (исключая "0", который уже добавлен)
+            for (id in manager.cameraIdList) {
+                if (id == "0" || units.any { it.id == id }) continue
+                val ch = try { manager.getCameraCharacteristics(id) } catch (_: Exception) { continue }
+                val facingInt = ch.get(CameraCharacteristics.LENS_FACING)
+                val facingStr = when (facingInt) {
+                    CameraCharacteristics.LENS_FACING_FRONT -> "front"
+                    CameraCharacteristics.LENS_FACING_BACK -> "back"
+                    else -> continue
+                }
+                val focals = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                val focal = focals?.firstOrNull() ?: 0.0f
+                val oisModes = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                val unitHasOis = oisModes?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+                val name = if (facingStr == "front") {
+                    if (id == "1") "Фронтальная (Селфи)" else "Фронтальная #$id"
+                } else {
+                    "Камера #$id"
+                }
+                units.add(CameraUnitInfo(
+                    id = id,
+                    name = name,
+                    type = if (facingStr == "front") "front" else "wide",
+                    facing = facingStr,
+                    focalLengthMm = focal,
+                    hasOis = unitHasOis,
+                    isPhysical = false
+                ))
+            }
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "getAllCameraUnits error", e)
+        }
+        cachedCameraUnits = units
+        return units
+    }
+
+    fun setCameraUnit(unitId: String, isPhysical: Boolean) {
+        Log.i("ROUTING_DEBUG", "Запрос выбора блока камеры: unitId=$unitId, isPhysical=$isPhysical")
+        if (unitId == "0.5x" || unitId == "lens_0.5x" || unitId == "50" || (ultraWidePhysicalId != null && unitId == ultraWidePhysicalId)) {
+            if (currentCameraFacingName != "back") {
+                currentCameraFacingName = "back"
+                currentExplicitCameraId = null
+                activePhysicalCameraId = null
+                bindCamera()
+            }
+            setLens("0.5x")
+            return
+        }
+        if (unitId.startsWith("lens_")) {
+            val lensName = unitId.removePrefix("lens_")
+            if (currentCameraFacingName != "back") {
+                currentCameraFacingName = "back"
+                currentExplicitCameraId = null
+                activePhysicalCameraId = null
+                bindCamera()
+            }
+            setLens(lensName)
+            return
+        }
+        if (unitId == "1x" || unitId == "0") {
+            if (currentCameraFacingName != "back" || currentExplicitCameraId != null || activePhysicalCameraId != null) {
+                currentCameraFacingName = "back"
+                currentExplicitCameraId = null
+                activePhysicalCameraId = null
+                bindCamera()
+            }
+            setLens("1x")
+            return
+        }
+        if (unitId == "2x" || unitId == "3x" || unitId == "5x" || unitId == "10x") {
+            if (currentCameraFacingName != "back") {
+                currentCameraFacingName = "back"
+                currentExplicitCameraId = null
+                activePhysicalCameraId = null
+                bindCamera()
+            }
+            setLens(unitId)
+            return
+        }
+        if (unitId == "1" || unitId == "front") {
+            currentCameraFacingName = "front"
+            currentExplicitCameraId = null
+            activePhysicalCameraId = null
+            currentZoomRatio = 1.0f
+            currentLensName = "front"
+            glRenderer?.autoFraming?.reset()
+            bindCamera()
+            return
+        }
+        val manager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+        if (manager != null && manager.cameraIdList.contains(unitId)) {
+            val ch = try { manager.getCameraCharacteristics(unitId) } catch (_: Exception) { null }
+            val facingInt = ch?.get(CameraCharacteristics.LENS_FACING)
+            val isFront = (facingInt == CameraCharacteristics.LENS_FACING_FRONT)
+            val newFacing = if (isFront) "front" else "back"
+            if (newFacing != currentCameraFacingName || isFront) {
+                currentZoomRatio = 1.0f
+                currentLensName = if (isFront) "front" else "1x"
+                glRenderer?.autoFraming?.reset()
+            }
+            currentCameraFacingName = newFacing
+            currentExplicitCameraId = unitId
+            activePhysicalCameraId = null
+            bindCamera()
+        } else {
+            Log.w("ROUTING_DEBUG", "Модуль камеры $unitId не найден в cameraIdList, мягкий откат на 1x")
+            setLens("1x")
+        }
+    }
+
     private fun getBatteryInfo(): Triple<Int, Float, Boolean> {
         try {
             val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
@@ -1149,15 +1980,19 @@ class FloatingCameraService : Service(),
     override fun getStatus(): ControlServer.StatusInfo {
         val (batteryLvl, batteryTemp, isCharging) = getBatteryInfo()
         val thermal = getThermalStatusString()
+        val reportedMinZoom = if (minZoomRatio <= 0.75f || hasWideCameraHardware || ultraWidePhysicalId != null || ultraWideCameraId != null) 0.5f else minZoomRatio
+        val orientVal = streamOrientation()
+        val isLand = (orientVal == 0 || orientVal == 180)
         return ControlServer.StatusInfo(
             isStreaming = isStreaming,
             cameraFacing = currentCameraFacingName,
             isTorchOn = isTorchOn,
-            orientation = currentOrientationMode,
+            orient = orientVal,
+            orientation = if (isLand) "horizontal" else "vertical",
             isMicMuted = audioStreamer?.isMuted ?: false,
             currentLens = currentLensName,
             currentZoom = currentZoomRatio,
-            minZoom = minZoomRatio,
+            minZoom = reportedMinZoom,
             maxZoom = maxZoomRatio,
             batteryLevel = batteryLvl,
             batteryTemp = batteryTemp,
@@ -1176,11 +2011,39 @@ class FloatingCameraService : Service(),
             awbMode = currentAwbMode,
             maxFps = activeMaxFps,
             supportedFps = activeSupportedFps,
-            currentFps = targetFps,
+            currentFps = minOf(targetFps, activeMaxFps),
             currentFpsRange = activeFpsRangeStr,
             width = targetWidth,
             height = targetHeight,
-            resolution = "${targetWidth}x${targetHeight}"
+            resolution = "${targetWidth}x${targetHeight}",
+            isAutoFraming = isAutoFramingEnabled,
+            pipelineMode = if (useGlPipeline || isAutoFramingEnabled) "gl" else "direct",
+            availableLenses = getAvailableLenses(),
+            isStabilization = isStabilization,
+            hasOis = hasOis,
+            hasEis = hasEis,
+            currentCameraUnit = when {
+                currentCameraFacingName == "front" -> (currentExplicitCameraId ?: "1")
+                currentExplicitCameraId != null && currentExplicitCameraId == ultraWideCameraId -> "0.5x"
+                currentExplicitCameraId != null -> currentExplicitCameraId!!
+                currentLensName == "0.5x" -> "0.5x"
+                currentLensName == "2x" -> "lens_2x"
+                currentLensName == "3x" -> "lens_3x"
+                currentLensName == "5x" -> "lens_5x"
+                currentLensName == "10x" -> "lens_10x"
+                else -> "0"
+            },
+            cameraUnits = getAllCameraUnits().map {
+                ControlServer.CameraUnitJson(
+                    id = it.id,
+                    name = it.name,
+                    type = it.type,
+                    facing = it.facing,
+                    focalLengthMm = it.focalLengthMm,
+                    hasOis = it.hasOis,
+                    isPhysical = it.isPhysical
+                )
+            }
         )
     }
 
@@ -1324,8 +2187,16 @@ class FloatingCameraService : Service(),
 
     fun switchCamera() {
         if (isSwitching) return
+        isSwitching = true
 
         currentCameraFacingName = if (currentCameraFacingName == "back") "front" else "back"
+
+        // Сбрасываем выбранные физические камеры и зум предыдущей камеры
+        currentExplicitCameraId = null
+        activePhysicalCameraId = null
+        currentZoomRatio = 1.0f
+        currentLensName = if (currentCameraFacingName == "front") "front" else "1x"
+        glRenderer?.autoFraming?.reset()
 
         if (currentCameraFacingName == "front" && isTorchOn) {
             isTorchOn = false
@@ -1419,6 +2290,11 @@ class FloatingCameraService : Service(),
         udpBeaconBroadcaster?.stop()
         udpBeaconBroadcaster = null
 
+        try {
+            unregisterReceiver(heatGuardReceiver)
+        } catch (_: Exception) {}
+
+        stopOrientationDetection()
         releaseLocks()
         stopStreamingInternal(isShuttingDown = true)
         controlServer?.stop()

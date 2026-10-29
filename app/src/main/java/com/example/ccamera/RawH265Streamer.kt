@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.io.DataOutputStream
@@ -12,8 +13,9 @@ import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
-import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -22,7 +24,7 @@ class RawH265Streamer(
     @Volatile private var width: Int = 1280,
     @Volatile private var height: Int = 720,
     bitRate: Int = 5_500_000,
-    @Volatile private var frameRate: Int = 60,
+    @Volatile var frameRate: Int = 60,
     private val listener: StatusListener? = null
 ) {
     interface StatusListener {
@@ -32,11 +34,22 @@ class RawH265Streamer(
     companion object {
         private const val TAG = "RawH265Streamer"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_HEVC
+
+        const val PKT_VIDEO_CONFIG: Byte = 1
+        const val PKT_VIDEO_FRAME: Byte  = 2
+        const val PKT_AUDIO_CONFIG: Byte = 3
+        const val PKT_AUDIO: Byte        = 4
+        const val PKT_STATUS: Byte       = 5
+        const val PKT_PING: Byte         = 6
     }
 
     @Volatile
     var bitRate: Int = bitRate
         private set
+
+    private var nominalBitrate: Int = bitRate
+    private var lastAbrDropMs: Long = 0L
+    private var lastAbrRecoverMs: Long = 0L
 
     private var mediaCodec: MediaCodec? = null
     var inputSurface: Surface? = null
@@ -57,29 +70,140 @@ class RawH265Streamer(
 
     private val serverExecutor = Executors.newSingleThreadExecutor()
     private val codecExecutor = Executors.newSingleThreadExecutor()
-    class PooledFrame(var data: ByteArray, var size: Int = 0)
+
+    class StreamPacket(
+        var type: Byte = PKT_VIDEO_FRAME,
+        var flags: Byte = 0,
+        var data: ByteArray = ByteArray(256 * 1024),
+        var size: Int = 0,
+        var ptsUs: Long = 0L,
+        var isVideo: Boolean = true,
+        var isKey: Boolean = false,
+        var tNs: Long = System.nanoTime()
+    )
 
     private val networkExecutor = Executors.newSingleThreadExecutor()
-    private val framePool = ArrayBlockingQueue<PooledFrame>(16)
-    private val frameQueue = ArrayBlockingQueue<PooledFrame>(6)
+    private val packetPool = ConcurrentLinkedQueue<StreamPacket>()
+    private val packetQueue = LinkedBlockingDeque<StreamPacket>()
 
-    init {
-        for (i in 0 until 16) {
-            framePool.offer(PooledFrame(ByteArray(256 * 1024), 0))
+    val queueAgeMs: Long
+        get() {
+            val first = packetQueue.peekFirst() ?: return 0L
+            return (System.nanoTime() - first.tNs) / 1_000_000L
+        }
+
+    private fun obtainPacket(minCapacity: Int): StreamPacket {
+        val pkt = packetPool.poll() ?: StreamPacket(data = ByteArray(maxOf(minCapacity, 256 * 1024)))
+        if (pkt.data.size < minCapacity) {
+            pkt.data = ByteArray(maxOf(minCapacity, pkt.data.size * 2))
+        }
+        return pkt
+    }
+
+    private fun recyclePacket(pkt: StreamPacket) {
+        pkt.size = 0
+        if (packetPool.size < 32) {
+            packetPool.offer(pkt)
         }
     }
 
-    private fun obtainFrame(minCapacity: Int): PooledFrame {
-        val pooled = framePool.poll() ?: PooledFrame(ByteArray(maxOf(minCapacity, 256 * 1024)), 0)
-        if (pooled.data.size < minCapacity) {
-            pooled.data = ByteArray(maxOf(minCapacity, pooled.data.size * 2))
+    fun enqueuePacket(type: Byte, flags: Byte, src: ByteArray, length: Int, ptsUs: Long, isVideo: Boolean, isKey: Boolean = false) {
+        if (!isConnected.get() || !isRunning.get()) return
+        if (isPaused && isVideo) return
+
+        val pkt = obtainPacket(length)
+        pkt.type = type
+        pkt.flags = flags
+        pkt.size = length
+        pkt.ptsUs = ptsUs
+        pkt.isVideo = isVideo
+        pkt.isKey = isKey
+        pkt.tNs = System.nanoTime()
+        if (length > 0) {
+            System.arraycopy(src, 0, pkt.data, 0, length)
         }
-        return pooled
+
+        while (packetQueue.size >= 16) {
+            val old = packetQueue.poll()
+            if (old != null) recyclePacket(old)
+        }
+
+        packetQueue.offer(pkt)
     }
 
-    private fun recycleFrame(frame: PooledFrame) {
-        frame.size = 0
-        framePool.offer(frame)
+    fun enqueuePacket(type: Byte, flags: Byte, buffer: ByteBuffer, offset: Int, length: Int, ptsUs: Long, isVideo: Boolean, isKey: Boolean = false) {
+        if (!isConnected.get() || !isRunning.get()) return
+        if (isPaused && isVideo) return
+
+        val pkt = obtainPacket(length)
+        pkt.type = type
+        pkt.flags = flags
+        pkt.size = length
+        pkt.ptsUs = ptsUs
+        pkt.isVideo = isVideo
+        pkt.isKey = isKey
+        pkt.tNs = System.nanoTime()
+        if (length > 0) {
+            val origPos = buffer.position()
+            buffer.position(offset)
+            buffer.get(pkt.data, 0, length)
+            buffer.position(origPos)
+        }
+
+        while (packetQueue.size >= 16) {
+            val old = packetQueue.poll()
+            if (old != null) recyclePacket(old)
+        }
+
+        packetQueue.offer(pkt)
+    }
+
+    fun enqueueAudio(pcm: ByteArray, size: Int, ptsUs: Long) {
+        if (!isConnected.get() || isPaused) return
+        enqueuePacket(PKT_AUDIO, 0, pcm, size, ptsUs, isVideo = false)
+    }
+
+    fun enqueueStatus(json: String) {
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        enqueuePacket(PKT_STATUS, 0, bytes, bytes.size, 0L, isVideo = false)
+    }
+
+    fun checkAbrCongestion(ageMs: Long) {
+        val now = SystemClock.elapsedRealtime()
+        if (ageMs > 200L) {
+            if (now - lastAbrDropMs > 2000L && bitRate > 1_500_000) {
+                val reduced = (bitRate * 0.70).toInt().coerceAtLeast(1_000_000)
+                Log.w(TAG, "[ABR] Очередь $ageMs мс > 200 мс! Снижение битрейта: $bitRate -> $reduced")
+                updateBitrate(reduced)
+                lastAbrDropMs = now
+            }
+        } else if (ageMs < 50L && bitRate < nominalBitrate) {
+            if (now - lastAbrDropMs > 5000L && now - lastAbrRecoverMs > 3000L) {
+                val recovered = (bitRate + 500_000).coerceAtMost(nominalBitrate)
+                Log.i(TAG, "[ABR] Сеть свободна ($ageMs мс). Восстановление: $bitRate -> $recovered")
+                updateBitrate(recovered)
+                lastAbrRecoverMs = now
+            }
+        }
+    }
+
+    fun checkLatencyDrop(ageMs: Long) {
+        if (ageMs > 450L) {
+            Log.w(TAG, "[LATENCY DROP] Задержка очереди $ageMs мс > 450 мс! Сброс видеоочереди...")
+            flushVideoQueue()
+            requestKeyFrame()
+        }
+    }
+
+    fun flushVideoQueue() {
+        val it = packetQueue.iterator()
+        while (it.hasNext()) {
+            val p = it.next()
+            if (p.isVideo) {
+                it.remove()
+                recyclePacket(p)
+            }
+        }
     }
 
     private var cachedCsdBuffer: ByteArray? = null
@@ -139,8 +263,8 @@ class RawH265Streamer(
             clientSocket = null
             isConnected.set(false)
             while (true) {
-                val leftover = frameQueue.poll() ?: break
-                recycleFrame(leftover)
+                val leftover = packetQueue.poll() ?: break
+                recyclePacket(leftover)
             }
         }
         if (isRunning.get()) {
@@ -243,16 +367,25 @@ class RawH265Streamer(
 
                         listener?.onStatusChanged("Стриминг активен", true)
 
-                        // 1. Отправляем кэшированный CSD (VPS/SPS/PPS) целиком единым пакетом
+                        // 1. Отправляем конфигурацию аудио (48000 Гц, 1 канал, 16-бит PCM)
+                        val audioCfg = ByteBuffer.allocate(8).apply {
+                            putInt(48000)
+                            putShort(1.toShort())
+                            putShort(16.toShort())
+                        }.array()
+                        enqueuePacket(PKT_AUDIO_CONFIG, 0, audioCfg, audioCfg.size, 0L, isVideo = false)
+
+                        // 2. Отправляем кэшированный CSD (VPS/SPS/PPS) в заголовке MUX
                         synchronized(this) {
                             cachedCsdBuffer?.let { csd ->
-                                stream.writeInt(csd.size)
-                                stream.write(csd)
-                                stream.flush()
+                                enqueuePacket(PKT_VIDEO_CONFIG, 0x03, csd, csd.size, 0L, isVideo = true, isKey = true)
                             }
                         }
 
-                        // 2. Немедленно запрашиваем ключевой кадр (IDR / Key-frame) для нового клиента
+                        // 3. Отправляем текущий статус потока
+                        enqueueStatus("{\"width\":$width,\"height\":$height,\"fps\":$frameRate,\"bitrate\":$bitRate}")
+
+                        // 4. Немедленно запрашиваем ключевой кадр (IDR / Key-frame) для нового клиента
                         requestKeyFrame()
 
                         val inStream = socket.getInputStream()
@@ -294,23 +427,49 @@ class RawH265Streamer(
 
     private fun startNetworkSender() {
         networkExecutor.execute {
-            Log.i(TAG, "Асинхронный поток отправки NALU (NetworkSender) запущен")
+            Log.i(TAG, "Асинхронный поток отправки пакетов MUX (NetworkSender) запущен")
+            val header = ByteArray(16)
+            header[0] = 0x4D.toByte() // 'M'
+            header[1] = 0x43.toByte() // 'C'
+
             while (isRunning.get()) {
                 try {
-                    val frame = frameQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
-                    if (!isConnected.get() || isPaused) {
-                        recycleFrame(frame)
+                    val pkt = packetQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
+                    if (!isConnected.get() || (isPaused && pkt.isVideo)) {
+                        recyclePacket(pkt)
                         continue
                     }
 
                     val stream = dataOutputStream ?: run {
-                        recycleFrame(frame)
+                        recyclePacket(pkt)
                         continue
                     }
-                    stream.writeInt(frame.size)
-                    stream.write(frame.data, 0, frame.size)
+
+                    header[2] = pkt.type
+                    header[3] = pkt.flags
+
+                    val len = pkt.size
+                    header[4] = ((len ushr 24) and 0xFF).toByte()
+                    header[5] = ((len ushr 16) and 0xFF).toByte()
+                    header[6] = ((len ushr 8) and 0xFF).toByte()
+                    header[7] = (len and 0xFF).toByte()
+
+                    val pts = pkt.ptsUs
+                    header[8] = ((pts ushr 56) and 0xFF).toByte()
+                    header[9] = ((pts ushr 48) and 0xFF).toByte()
+                    header[10] = ((pts ushr 40) and 0xFF).toByte()
+                    header[11] = ((pts ushr 32) and 0xFF).toByte()
+                    header[12] = ((pts ushr 24) and 0xFF).toByte()
+                    header[13] = ((pts ushr 16) and 0xFF).toByte()
+                    header[14] = ((pts ushr 8) and 0xFF).toByte()
+                    header[15] = (pts and 0xFF).toByte()
+
+                    stream.write(header, 0, 16)
+                    if (len > 0) {
+                        stream.write(pkt.data, 0, len)
+                    }
                     stream.flush()
-                    recycleFrame(frame)
+                    recyclePacket(pkt)
                 } catch (e: Exception) {
                     if (isRunning.get() && isConnected.get()) {
                         Log.e(TAG, "Ошибка передачи пакета по сети", e)
@@ -364,27 +523,18 @@ class RawH265Streamer(
                             outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
 
                             val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                            val isKeyFrame = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+
                             if (isCodecConfig) {
                                 cacheCsdBuffer(outputBuffer, bufferInfo)
-                            }
+                                enqueuePacket(PKT_VIDEO_CONFIG, 0x03, outputBuffer, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, isVideo = true, isKey = true)
+                            } else if (isConnected.get() && !isPaused && bufferInfo.size > 0) {
+                                val ageMs = queueAgeMs
+                                checkAbrCongestion(ageMs)
+                                checkLatencyDrop(ageMs)
 
-                            if (isConnected.get() && !isPaused && bufferInfo.size > 0) {
-                                val size = bufferInfo.size
-                                val frame = obtainFrame(size)
-                                val originalPos = outputBuffer.position()
-                                outputBuffer.get(frame.data, 0, size)
-                                outputBuffer.position(originalPos)
-                                frame.size = size
-
-                                // Если Wi-Fi временно перегружен (очередь 6 кадров заполнена), сбрасываем старый кадр и просим чистый IDR
-                                if (!frameQueue.offer(frame)) {
-                                    val dropped = frameQueue.poll()
-                                    if (dropped != null) recycleFrame(dropped)
-                                    if (!frameQueue.offer(frame)) {
-                                        recycleFrame(frame)
-                                    }
-                                    requestKeyFrame()
-                                }
+                                val flags: Byte = if (isKeyFrame) 0x01 else 0x00
+                                enqueuePacket(PKT_VIDEO_FRAME, flags, outputBuffer, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, isVideo = true, isKey = isKeyFrame)
                             }
                         }
                         codec.releaseOutputBuffer(outputBufferIndex, false)
@@ -410,7 +560,7 @@ class RawH265Streamer(
         if (!isRunning.getAndSet(false)) return
 
         disconnectClient()
-        framePool.clear()
+        packetPool.clear()
 
         try {
             serverSocket?.close()

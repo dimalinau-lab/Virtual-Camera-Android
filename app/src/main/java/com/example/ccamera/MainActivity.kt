@@ -22,12 +22,19 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.util.Rational
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -69,16 +76,99 @@ class MainActivity : AppCompatActivity() {
         hideZenUi()
     }
 
+    private var sensorManager: SensorManager? = null
+    private var accelerometer: Sensor? = null
+    private var gyroscope: Sensor? = null
+    private var isAutoDimmingEnabled = true
+    private var lastAccelX = 0f
+    private var lastAccelY = 0f
+    private var lastAccelZ = 0f
+    private var hasInitialAccel = false
+    private var lastMotionTime = 0L
+
+    private val motionSensorListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent?) {
+            if (event == null) return
+            if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
+                if (!hasInitialAccel) {
+                    lastAccelX = x
+                    lastAccelY = y
+                    lastAccelZ = z
+                    hasInitialAccel = true
+                    return
+                }
+                val delta = Math.abs(x - lastAccelX) + Math.abs(y - lastAccelY) + Math.abs(z - lastAccelZ)
+                lastAccelX = x
+                lastAccelY = y
+                lastAccelZ = z
+
+                if (delta > 0.40f) {
+                    onDeviceMoved()
+                }
+            } else if (event.sensor.type == Sensor.TYPE_GYROSCOPE) {
+                val gx = event.values[0]
+                val gy = event.values[1]
+                val gz = event.values[2]
+                val rotSpeed = Math.sqrt((gx * gx + gy * gy + gz * gz).toDouble()).toFloat()
+                if (rotSpeed > 0.18f) {
+                    onDeviceMoved()
+                }
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    private fun onDeviceMoved() {
+        val now = System.currentTimeMillis()
+        if (now - lastMotionTime < 600) return
+        lastMotionTime = now
+
+        if (binding.blackoutOverlay.visibility == View.VISIBLE) {
+            disableBlackout()
+            Toast.makeText(this, "📱 Движение обнаружено: экран включен", Toast.LENGTH_SHORT).show()
+        } else if (isAutoDimmingEnabled && cameraService?.isStreamingActive() == true) {
+            scheduleAutoBlackout()
+        }
+    }
+
+    private fun startMotionSensor() {
+        if (sensorManager == null) {
+            sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        }
+        val sm = sensorManager ?: return
+        accelerometer = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        gyroscope = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        hasInitialAccel = false
+
+        accelerometer?.let {
+            sm.registerListener(motionSensorListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        gyroscope?.let {
+            sm.registerListener(motionSensorListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    private fun stopMotionSensor() {
+        try {
+            sensorManager?.unregisterListener(motionSensorListener)
+        } catch (_: Exception) {}
+    }
+
     private val autoBlackoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoBlackoutRunnable = Runnable {
-        if (cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
+        if (isAutoDimmingEnabled && cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
             enableBlackout()
-            Toast.makeText(this, "Энергосбережение: экран затемнен (коснитесь для пробуждения)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Энергосбережение: экран затемнен (подвигайте телефон для пробуждения)", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun scheduleAutoBlackout() {
         autoBlackoutHandler.removeCallbacks(autoBlackoutRunnable)
+        if (!isAutoDimmingEnabled) return
         if (cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
             autoBlackoutHandler.postDelayed(autoBlackoutRunnable, 30_000L)
         }
@@ -86,6 +176,50 @@ class MainActivity : AppCompatActivity() {
 
     private fun cancelAutoBlackout() {
         autoBlackoutHandler.removeCallbacks(autoBlackoutRunnable)
+    }
+
+    private fun updateEcoBlackoutUI() {
+        binding.btnEcoBlackout.imageTintList = ColorStateList.valueOf(
+            if (isAutoDimmingEnabled) Color.parseColor("#10B981") else Color.parseColor("#71717A")
+        )
+        binding.btnEcoBlackout.backgroundTintList = ColorStateList.valueOf(
+            if (isAutoDimmingEnabled) Color.parseColor("#3310B981") else Color.parseColor("#26FFFFFF")
+        )
+    }
+
+    private var isBottomPanelHidden = false
+
+    private fun hideBottomPanel() {
+        if (isBottomPanelHidden) return
+        isBottomPanelHidden = true
+        binding.bottomPanelContainer.animate()
+            .translationY(300f)
+            .alpha(0f)
+            .setDuration(220)
+            .withEndAction {
+                binding.bottomPanelContainer.visibility = View.GONE
+                binding.btnShowBottomPanel.visibility = View.VISIBLE
+                binding.btnShowBottomPanel.alpha = 0f
+                binding.btnShowBottomPanel.translationY = 40f
+                binding.btnShowBottomPanel.animate().translationY(0f).alpha(1f).setDuration(180).start()
+            }
+            .start()
+    }
+
+    private fun showBottomPanel() {
+        if (!isBottomPanelHidden) return
+        isBottomPanelHidden = false
+        binding.btnShowBottomPanel.animate().alpha(0f).setDuration(150).withEndAction {
+            binding.btnShowBottomPanel.visibility = View.GONE
+        }.start()
+
+        binding.bottomPanelContainer.visibility = View.VISIBLE
+        binding.bottomPanelContainer.translationY = 300f
+        binding.bottomPanelContainer.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(220)
+            .start()
     }
 
     private fun toggleZenUi() {
@@ -96,35 +230,87 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
+
     private fun showZenUi() {
         isZenUiHidden = false
-        binding.topBarLayout.animate().alpha(1f).setDuration(250).withStartAction {
+        binding.topBarLayout.animate().alpha(1f).setDuration(220).withStartAction {
             binding.topBarLayout.visibility = View.VISIBLE
         }.start()
-        binding.bottomActionBar.animate().alpha(1f).setDuration(250).withStartAction {
-            binding.bottomActionBar.visibility = View.VISIBLE
-        }.start()
-        binding.btnFloatingTogglePill.animate().alpha(1f).setDuration(250).withStartAction {
+        if (!isBottomPanelHidden) {
+            binding.bottomPanelContainer.animate().alpha(1f).translationY(0f).setDuration(220).withStartAction {
+                binding.bottomPanelContainer.visibility = View.VISIBLE
+            }.start()
+        } else {
+            binding.btnShowBottomPanel.visibility = View.VISIBLE
+        }
+        binding.btnFloatingTogglePill.animate().alpha(1f).setDuration(220).withStartAction {
             binding.btnFloatingTogglePill.visibility = View.VISIBLE
         }.start()
 
         zenHideHandler.removeCallbacks(zenHideRunnable)
-        if (cameraService?.isStreamingActive() == true) {
-            zenHideHandler.postDelayed(zenHideRunnable, 3500)
-        }
     }
 
     private fun hideZenUi() {
         isZenUiHidden = true
-        binding.topBarLayout.animate().alpha(0f).setDuration(300).withEndAction {
+        binding.topBarLayout.animate().alpha(0f).setDuration(220).withEndAction {
             binding.topBarLayout.visibility = View.INVISIBLE
         }.start()
-        binding.bottomActionBar.animate().alpha(0f).setDuration(300).withEndAction {
-            binding.bottomActionBar.visibility = View.INVISIBLE
+        binding.bottomPanelContainer.animate().alpha(0f).setDuration(220).withEndAction {
+            binding.bottomPanelContainer.visibility = View.INVISIBLE
         }.start()
-        binding.btnFloatingTogglePill.animate().alpha(0f).setDuration(300).withEndAction {
+        binding.btnShowBottomPanel.visibility = View.GONE
+        binding.btnFloatingTogglePill.animate().alpha(0f).setDuration(220).withEndAction {
             binding.btnFloatingTogglePill.visibility = View.INVISIBLE
         }.start()
+    }
+
+    fun updateLensBar() {
+        val service = cameraService ?: return
+        val status = service.getStatus()
+        val lenses = status.availableLenses
+        val currentLens = status.currentLens
+        val currentZoom = status.currentZoom
+
+        binding.lensBarLayout.post {
+            binding.lensBarLayout.removeAllViews()
+            if (lenses.isEmpty()) {
+                binding.lensBarLayout.visibility = View.GONE
+                return@post
+            }
+            binding.lensBarLayout.visibility = View.VISIBLE
+
+            for (lens in lenses) {
+                val tv = TextView(this).apply {
+                    val isSelected = (lens == currentLens) || (lens.replace("x", "").toFloatOrNull()?.let { Math.abs(it - currentZoom) < 0.15f } == true)
+                    text = lens
+                    textSize = 12f
+                    gravity = android.view.Gravity.CENTER
+                    setPadding(26, 10, 26, 10)
+                    setTextColor(if (isSelected) Color.WHITE else Color.parseColor("#D4D4D8"))
+                    if (isSelected) {
+                        setBackgroundResource(R.drawable.bg_overlay_dot_core)
+                        backgroundTintList = ColorStateList.valueOf(Color.parseColor("#E11D48")) // Rose-600
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                    } else {
+                        setBackgroundColor(Color.TRANSPARENT)
+                        setTypeface(null, android.graphics.Typeface.NORMAL)
+                    }
+                    val lp = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(6, 0, 6, 0)
+                    }
+                    layoutParams = lp
+                    setOnClickListener {
+                        service.setLens(lens)
+                        updateLensBar()
+                    }
+                }
+                binding.lensBarLayout.addView(tv)
+            }
+        }
     }
 
     private val statusListener = object : FloatingCameraService.ServiceStatusListener {
@@ -238,6 +424,10 @@ class MainActivity : AppCompatActivity() {
             updateFloatingModeUI(isFloatingEnabled)
             updateMuteButtonUI(cameraService?.isMicMuted() ?: true)
             updateStreamingStatusUI(cameraService?.isStreamingActive() ?: false)
+            updateAutoFramingUI(cameraService?.isAutoFramingEnabled ?: false)
+            updateStabilizationUI(cameraService?.isStabilization ?: false, cameraService?.hasOis ?: false, cameraService?.hasEis ?: false)
+            updateFlipCameraUI(cameraService?.currentCameraFacing == "front")
+            updateLensBar()
             updatePipParams()
             Log.i(TAG, "Успешно привязаны к FloatingCameraService")
         }
@@ -358,7 +548,20 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val service = cameraService ?: return false
+                val status = service.getStatus()
+                val factor = detector.scaleFactor
+                val targetZoom = (status.currentZoom * factor).coerceIn(status.minZoom, status.maxZoom)
+                service.setZoomRatio(targetZoom)
+                updateLensBar()
+                return true
+            }
+        })
+
         binding.viewFinder.setOnTouchListener { v, event ->
+            scaleGestureDetector.onTouchEvent(event)
             previewGestureDetector.onTouchEvent(event)
             if (event.action == MotionEvent.ACTION_UP) {
                 v.performClick()
@@ -375,8 +578,46 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
+        binding.btnHideBottomPanel.setOnClickListener {
+            hideBottomPanel()
+        }
+
+        binding.btnShowBottomPanel.setOnClickListener {
+            showBottomPanel()
+        }
+
         binding.btnFlipCamera.setOnClickListener {
-            cameraService?.switchCamera()
+            val service = cameraService ?: return@setOnClickListener
+            service.switchCamera()
+            val isFront = (service.currentCameraFacing == "front")
+            updateFlipCameraUI(isFront)
+            binding.viewFinder.postDelayed({
+                updateLensBar()
+                updateFlipCameraUI(service.currentCameraFacing == "front")
+            }, 650)
+            Toast.makeText(this, if (isFront) "Камера: Фронтальная" else "Камера: Основная", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.btnAutoFraming.setOnClickListener {
+            val service = cameraService ?: return@setOnClickListener
+            val newState = !service.isAutoFramingEnabled
+            service.setAutoFramingEnabled(newState)
+            updateAutoFramingUI(newState)
+            Toast.makeText(this, if (newState) "Автокадрирование лица: ВКЛ" else "Автокадрирование лица: ВЫКЛ", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.btnStabilization.setOnClickListener {
+            val service = cameraService ?: return@setOnClickListener
+            val newState = !service.isStabilization
+            service.setStabilizationEnabled(newState)
+            updateStabilizationUI(newState, service.hasOis, service.hasEis)
+            val tag = when {
+                service.hasOis && service.hasEis -> " (OIS + EIS)"
+                service.hasOis -> " (OIS оптическая)"
+                service.hasEis -> " (EIS электронная)"
+                else -> ""
+            }
+            Toast.makeText(this, if (newState) "Стабилизация$tag: ВКЛ" else "Стабилизация: ВЫКЛ", Toast.LENGTH_SHORT).show()
         }
 
         binding.btnFloatingMode.setOnClickListener {
@@ -416,12 +657,28 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnEcoBlackout.setOnClickListener {
+            isAutoDimmingEnabled = !isAutoDimmingEnabled
+            updateEcoBlackoutUI()
+            if (isAutoDimmingEnabled) {
+                scheduleAutoBlackout()
+                Toast.makeText(this, "⏱️ Эко-затухание по гироскопу (30 сек): ВКЛ", Toast.LENGTH_SHORT).show()
+            } else {
+                cancelAutoBlackout()
+                if (binding.blackoutOverlay.visibility == View.VISIBLE) {
+                    disableBlackout()
+                }
+                Toast.makeText(this, "⏱️ Эко-затухание по гироскопу: ВЫКЛ", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnEcoBlackout.setOnLongClickListener {
             val isBlackout = cameraService?.toggleBlackout() ?: false
             if (isBlackout) {
                 enableBlackout()
             } else {
                 disableBlackout()
             }
+            true
         }
 
         binding.btnMuteMic.setOnClickListener {
@@ -458,6 +715,7 @@ class MainActivity : AppCompatActivity() {
         updateFloatingModeUI(isFloatingEnabled)
 
         updateMuteButtonUI(cameraService?.isMicMuted() ?: false)
+        updateEcoBlackoutUI()
         checkAndRequestPermissions()
     }
 
@@ -544,6 +802,34 @@ class MainActivity : AppCompatActivity() {
         updatePipParams()
     }
 
+    private fun updateAutoFramingUI(enabled: Boolean) {
+        binding.btnAutoFraming.imageTintList = ColorStateList.valueOf(
+            if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#A1A1AA")
+        )
+        binding.btnAutoFraming.backgroundTintList = ColorStateList.valueOf(
+            if (enabled) Color.parseColor("#3338BDF8") else Color.parseColor("#26FFFFFF")
+        )
+    }
+
+    private fun updateStabilizationUI(enabled: Boolean, hasOis: Boolean = true, hasEis: Boolean = true) {
+        val activeColor = if (hasOis || hasEis) Color.parseColor("#10B981") else Color.parseColor("#F59E0B")
+        binding.btnStabilization.imageTintList = ColorStateList.valueOf(
+            if (enabled) activeColor else Color.parseColor("#A1A1AA")
+        )
+        binding.btnStabilization.backgroundTintList = ColorStateList.valueOf(
+            if (enabled) Color.parseColor("#3310B981") else Color.parseColor("#26FFFFFF")
+        )
+    }
+
+    private fun updateFlipCameraUI(isFront: Boolean) {
+        binding.btnFlipCamera.imageTintList = ColorStateList.valueOf(
+            if (isFront) Color.parseColor("#38BDF8") else Color.parseColor("#FFFFFF")
+        )
+        binding.btnFlipCamera.backgroundTintList = ColorStateList.valueOf(
+            if (isFront) Color.parseColor("#3338BDF8") else Color.parseColor("#26FFFFFF")
+        )
+    }
+
     private fun updateStreamingStatusUI(isStreaming: Boolean) {
         if (isStreaming) {
             binding.statusText.text = "В ЭФИРЕ"
@@ -590,6 +876,16 @@ class MainActivity : AppCompatActivity() {
         if (isServiceBound) {
             cameraService?.startCameraOnce()
         }
+        startMotionSensor()
+        updateEcoBlackoutUI()
+        if (isAutoDimmingEnabled && cameraService?.isStreamingActive() == true) {
+            scheduleAutoBlackout()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopMotionSensor()
     }
 
     override fun onUserLeaveHint() {
@@ -653,7 +949,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             surfaceView.holder.setKeepScreenOn(true)
-            surfaceView.holder.setFixedSize(width, height)
+            val isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            val (bufW, bufH) = if (isPortrait) Pair(height, width) else Pair(width, height)
+            surfaceView.holder.setFixedSize(bufW, bufH)
             surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(holder: SurfaceHolder) {
                     Log.i(TAG, "Экранный SurfaceHolder создан: ${holder.surface}")
@@ -826,6 +1124,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopMotionSensor()
         cancelAutoBlackout()
         zenHideHandler.removeCallbacks(zenHideRunnable)
         try {

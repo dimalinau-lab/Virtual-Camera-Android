@@ -30,6 +30,7 @@ class ControlServer(
         val cameraFacing: String,
         val isTorchOn: Boolean,
         val orientation: String = "vertical",
+        val orient: Int = 90,
         val isMicMuted: Boolean = false,
         val currentLens: String = "1x",
         val currentZoom: Float = 1.0f,
@@ -56,7 +57,25 @@ class ControlServer(
         val currentFpsRange: String = "[60, 60]",
         val width: Int = 1920,
         val height: Int = 1080,
-        val resolution: String = "1920x1080"
+        val resolution: String = "1920x1080",
+        val isAutoFraming: Boolean = false,
+        val pipelineMode: String = "gl",
+        val availableLenses: List<String> = listOf("1x"),
+        val isStabilization: Boolean = false,
+        val hasOis: Boolean = false,
+        val hasEis: Boolean = false,
+        val currentCameraUnit: String = "0",
+        val cameraUnits: List<CameraUnitJson> = emptyList()
+    )
+
+    data class CameraUnitJson(
+        val id: String,
+        val name: String,
+        val type: String,
+        val facing: String,
+        val focalLengthMm: Float,
+        val hasOis: Boolean,
+        val isPhysical: Boolean
     )
 
     companion object {
@@ -221,10 +240,27 @@ class ControlServer(
                         else if (postData.contains("toggle_mic_mute")) action = "toggle_mic_mute"
                         else if (postData.contains("set_lens")) action = "set_lens"
                         else if (postData.contains("set_zoom")) action = "set_zoom"
+                        else if (postData.contains("toggle_stabilization")) action = "toggle_stabilization"
+                        else if (postData.contains("set_stabilization")) action = "set_stabilization"
+                        else if (postData.contains("set_camera_unit")) action = "set_camera_unit"
                     }
                     val params = jsonObj ?: JSONObject()
                     if (action.isNotBlank()) {
                         callback.onActionRequested(action, params)
+                    }
+                    if (action == "toggle_stabilization" || action == "set_stabilization") {
+                        val status = callback.getStatus()
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"ok\",\"action\":\"$action\",\"stabilization\":${status.isStabilization},\"has_ois\":${status.hasOis},\"has_eis\":${status.hasEis}}"
+                        )
+                    }
+                    if (action == "set_camera_unit") {
+                        val status = callback.getStatus()
+                        return newJsonResponse(
+                            Response.Status.OK,
+                            "{\"status\":\"ok\",\"action\":\"$action\",\"current_camera_unit\":\"${status.currentCameraUnit}\"}"
+                        )
                     }
                     if (action == "toggle_mic_mute") {
                         val status = callback.getStatus()
@@ -304,6 +340,30 @@ class ControlServer(
                         "{\"status\":\"ok\",\"zoom\":${status.currentZoom}}"
                     )
                 }
+                "/api/stabilization" -> {
+                    val enabled = jsonObj?.optBoolean("enabled") ?: parms["enabled"]?.firstOrNull()?.toBoolean() ?: true
+                    val p = JSONObject().apply { put("enabled", enabled) }
+                    callback.onActionRequested("set_stabilization", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"stabilization\":${status.isStabilization},\"has_ois\":${status.hasOis},\"has_eis\":${status.hasEis}}"
+                    )
+                }
+                "/api/camera_unit" -> {
+                    val unitId = jsonObj?.optString("id") ?: parms["id"]?.firstOrNull() ?: "0"
+                    val isPhys = jsonObj?.optBoolean("is_physical") ?: parms["is_physical"]?.firstOrNull()?.toBoolean() ?: false
+                    val p = JSONObject().apply {
+                        put("id", unitId)
+                        put("is_physical", isPhys)
+                    }
+                    callback.onActionRequested("set_camera_unit", p)
+                    val status = callback.getStatus()
+                    return newJsonResponse(
+                        Response.Status.OK,
+                        "{\"status\":\"ok\",\"current_camera_unit\":\"${status.currentCameraUnit}\"}"
+                    )
+                }
                 "/api/status" -> {
                     val status = callback.getStatus()
                     val responseJson = JSONObject().apply {
@@ -312,11 +372,13 @@ class ControlServer(
                         put("camera", status.cameraFacing)
                         put("torch", status.isTorchOn)
                         put("orientation", status.orientation)
+                        put("orient", status.orient)
                         put("mic_muted", status.isMicMuted)
                         put("lens", status.currentLens)
                         put("zoom", status.currentZoom)
                         put("min_zoom", status.minZoom)
                         put("max_zoom", status.maxZoom)
+                        put("available_lenses", org.json.JSONArray(status.availableLenses))
                         put("battery_level", status.batteryLevel)
                         put("battery_temp", status.batteryTemp)
                         put("is_charging", status.isCharging)
@@ -339,6 +401,25 @@ class ControlServer(
                         put("width", status.width)
                         put("height", status.height)
                         put("resolution", status.resolution)
+                        put("auto_framing", status.isAutoFraming)
+                        put("pipeline_mode", status.pipelineMode)
+                        put("stabilization", status.isStabilization)
+                        put("has_ois", status.hasOis)
+                        put("has_eis", status.hasEis)
+                        put("current_camera_unit", status.currentCameraUnit)
+                        val unitsArr = org.json.JSONArray()
+                        for (u in status.cameraUnits) {
+                            unitsArr.put(org.json.JSONObject().apply {
+                                put("id", u.id)
+                                put("name", u.name)
+                                put("type", u.type)
+                                put("facing", u.facing)
+                                put("focal_length", u.focalLengthMm)
+                                put("has_ois", u.hasOis)
+                                put("is_physical", u.isPhysical)
+                            })
+                        }
+                        put("camera_units", unitsArr)
                     }.toString()
                     return newJsonResponse(Response.Status.OK, responseJson)
                 }

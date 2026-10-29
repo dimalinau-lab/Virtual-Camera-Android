@@ -3,7 +3,10 @@ package com.example.ccamera
 import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaRecorder
+import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import java.io.IOException
 import java.io.OutputStream
@@ -18,9 +21,9 @@ class AudioStreamer(
 ) {
     companion object {
         private const val TAG = "AudioStreamer"
-        private const val SAMPLE_RATE = 48000
-        private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
-        private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        const val SAMPLE_RATE = 48000
+        const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
+        const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_COMMUNICATION
         private const val CHUNK_SIZE = 1024
     }
@@ -30,6 +33,9 @@ class AudioStreamer(
     private var clientSocket: Socket? = null
     @Volatile
     private var outStream: OutputStream? = null
+
+    @Volatile
+    var audioSink: ((pcm: ByteArray, size: Int, ptsUs: Long) -> Unit)? = null
 
     @Volatile
     var isMuted: Boolean = false
@@ -48,6 +54,7 @@ class AudioStreamer(
         if (isRunning.getAndSet(true)) return
         Log.i(TAG, "Запуск AudioStreamer на порту $port")
         startServerSocket()
+        startAudioRecording()
     }
 
     private fun startServerSocket() {
@@ -57,7 +64,7 @@ class AudioStreamer(
                 ss.reuseAddress = true
                 ss.bind(InetSocketAddress("0.0.0.0", port))
                 serverSocket = ss
-                Log.i(TAG, "Аудио-сервер слушает интерфейс 0.0.0.0 на порту $port")
+                Log.i(TAG, "Аудио-сервер слушает интерфейс 0.0.0.0 на порту $port (Legacy fallback)")
 
                 while (isRunning.get()) {
                     try {
@@ -72,9 +79,7 @@ class AudioStreamer(
                             isConnected.set(true)
                         }
 
-                        Log.i(TAG, "ПК подключился к аудио-серверу: ${socket.remoteSocketAddress}")
-
-                        startAudioRecording()
+                        Log.i(TAG, "ПК подключился к legacy аудио-серверу: ${socket.remoteSocketAddress}")
 
                         val inStream = socket.getInputStream()
                         val dummyBuffer = ByteArray(128)
@@ -85,7 +90,6 @@ class AudioStreamer(
                     } catch (e: IOException) {
                         if (!isRunning.get()) break
                     } finally {
-                        stopAudioRecording()
                         disconnectClientInternal()
                     }
                 }
@@ -120,24 +124,41 @@ class AudioStreamer(
 
                 audioRecord = record
                 record.startRecording()
-                Log.i(TAG, "Запись аудио запущена (VOICE_COMMUNICATION, 48000Hz, MONO, 16BIT)")
+                Log.i(TAG, "Запись аудио запущена (VOICE_COMMUNICATION, 48000Hz, MONO, 16BIT, TIMEBASE_BOOTTIME)")
 
                 val buffer = ByteArray(CHUNK_SIZE)
-                while (isRunning.get() && isConnected.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                val audioTimestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) AudioTimestamp() else null
+
+                while (isRunning.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     val bytesRead = record.read(buffer, 0, CHUNK_SIZE)
                     if (bytesRead > 0) {
                         applyMuteWithRamping(buffer, bytesRead, isMuted)
-                        val stream = outStream
-                        if (stream != null) {
-                            try {
-                                stream.write(buffer, 0, bytesRead)
-                                // ВНИМАНИЕ: Не вызывать flush() на каждый микрочанкер!
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Ошибка записи в аудио сокет: ${e.message}")
-                                break
+
+                        var ptsUs: Long = 0L
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && audioTimestamp != null) {
+                            if (record.getTimestamp(audioTimestamp, AudioTimestamp.TIMEBASE_BOOTTIME) == AudioRecord.SUCCESS) {
+                                ptsUs = audioTimestamp.nanoTime / 1000L
                             }
+                        }
+                        if (ptsUs <= 0L) {
+                            ptsUs = SystemClock.elapsedRealtimeNanos() / 1000L
+                        }
+
+                        // Мультиплексированная отправка с точным аппаратным PTS (Zero-Drift Lip-Sync)
+                        val sink = audioSink
+                        if (sink != null) {
+                            sink.invoke(buffer.copyOf(bytesRead), bytesRead, ptsUs)
                         } else {
-                            break
+                            // Legacy fallback сокет (если мультиплексирование не активно)
+                            val stream = outStream
+                            if (stream != null && isConnected.get()) {
+                                try {
+                                    stream.write(buffer, 0, bytesRead)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Ошибка записи в legacy аудио сокет: ${e.message}")
+                                    disconnectClientInternal()
+                                }
+                            }
                         }
                     } else if (bytesRead < 0) {
                         Log.e(TAG, "Ошибка чтения AudioRecord: $bytesRead")
