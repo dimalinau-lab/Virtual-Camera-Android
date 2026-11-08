@@ -354,6 +354,7 @@ class RawH265Streamer(
                     try {
                         val socket = ss.accept()
                         socket.tcpNoDelay = true // Отключаем задержку Nagle для мгновенной отправки
+                        socket.trafficClass = 0x10 // IPTOS_LOWDELAY для приоритетной сетевой отправки
                         socket.sendBufferSize = 512 * 1024 // 512 КБ буфер сокета для сглаживания всплесков I-кадров
 
                         var stream: DataOutputStream
@@ -363,6 +364,7 @@ class RawH265Streamer(
                             stream = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
                             dataOutputStream = stream
                             isConnected.set(true)
+                            isPaused = false
                         }
 
                         listener?.onStatusChanged("Стриминг активен", true)

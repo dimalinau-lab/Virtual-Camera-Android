@@ -35,6 +35,9 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.hardware.SensorManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
 import android.provider.Settings
 import android.util.Log
 import android.util.Range
@@ -105,6 +108,7 @@ class FloatingCameraService : Service(),
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     private var overlayController: OverlayController? = null
     private var blackoutOverlayView: View? = null
@@ -451,7 +455,14 @@ class FloatingCameraService : Service(),
                     acquire()
                 }
             }
-            Log.i(TAG, "WakeLock и WifiLock успешно зафиксированы")
+            if (multicastLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                multicastLock = wm.createMulticastLock("VCam::MulticastLock").apply {
+                    setReferenceCounted(true)
+                    acquire()
+                }
+            }
+            Log.i(TAG, "WakeLock, WifiLock и MulticastLock успешно зафиксированы")
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка захвата WakeLock / WifiLock", e)
         }
@@ -468,6 +479,11 @@ class FloatingCameraService : Service(),
                 wifiLock?.release()
             }
             wifiLock = null
+
+            if (multicastLock?.isHeld == true) {
+                multicastLock?.release()
+            }
+            multicastLock = null
             Log.i(TAG, "WakeLock и WifiLock освобождены")
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка освобождения WakeLock / WifiLock", e)
@@ -1136,76 +1152,112 @@ class FloatingCameraService : Service(),
     }
 
     private var orientationListener: OrientationEventListener? = null
+    private var accelSensorListener: SensorEventListener? = null
+
+    fun sendCurrentOrientationStatus() {
+        val orient = streamOrientation()
+        val isLandscape = (orient == 0 || orient == 180)
+        val statusJson = org.json.JSONObject()
+            .put("orient", orient)
+            .put("orientation", if (isLandscape) "horizontal" else "vertical")
+            .put("facing", currentCameraFacingName)
+            .toString()
+        streamer?.enqueueStatus(statusJson)
+        Log.i("ROUTING_DEBUG", "[Sensor] Отправлен статус ориентации: orient=$orient, isLandscape=$isLandscape (dev=$deviceOrientationDegrees°)")
+    }
 
     fun setOrientation(mode: String) {
         setOrientationInternal(mode)
     }
 
     private fun setOrientationInternal(mode: String) {
-        val normalized = when {
-            mode == "auto" -> "auto"
-            mode.contains("horiz") || mode.contains("land") -> "horizontal"
-            else -> "vertical"
-        }
-        currentOrientationMode = normalized
         val orient = streamOrientation()
         glRenderer?.setOrientation(orient)
-        val isLand = (orient == 0 || orient == 180)
-        val json = org.json.JSONObject()
-            .put("orient", orient)
-            .put("orientation", if (isLand) "horizontal" else "vertical")
-            .toString()
-        streamer?.enqueueStatus(json)
-        streamer?.requestKeyFrame()
-        Log.i("ROUTING_DEBUG", "Ориентация установлена: $normalized, streamOrient=$orient")
+        sendCurrentOrientationStatus()
+        Log.i("ROUTING_DEBUG", "Ориентация обновлена вручную: streamOrient=$orient")
     }
 
     private var deviceOrientationDegrees = 0
 
     fun streamOrientation(): Int {
-        val dev = when (currentOrientationMode) {
-            "horizontal" -> return 0
-            "vertical" -> 0
-            else -> deviceOrientationDegrees
-        }
+        val dev = deviceOrientationDegrees
         val isFront = (currentCameraFacingName == "front")
-        val sensor = if (isFront) 270 else 90
-        return if (isFront) (sensor - dev + 360) % 360 else (sensor + dev) % 360
+        return if (isFront) {
+            (270 - dev + 360) % 360
+        } else {
+            (dev + 90) % 360
+        }
+    }
+
+    private fun updateOrientationFromSnapped(snapped: Int) {
+        val cur = deviceOrientationDegrees
+        if (snapped != cur) {
+            deviceOrientationDegrees = snapped
+            val orient = streamOrientation()
+            glRenderer?.setOrientation(orient)
+            sendCurrentOrientationStatus()
+            Log.i("ROUTING_DEBUG", "[Sensor] Авто-ориентация телефона: snapped=$snapped°, orient=$orient")
+        }
     }
 
     fun startOrientationDetection() {
-        if (orientationListener != null) return
+        if (orientationListener != null || accelSensorListener != null) return
         try {
-            orientationListener = object : OrientationEventListener(this, SensorManager.SENSOR_DELAY_NORMAL) {
-                override fun onOrientationChanged(degrees: Int) {
-                    if (degrees == ORIENTATION_UNKNOWN) return
-                    val cur = deviceOrientationDegrees
-                    var diff = Math.abs(degrees - cur) % 360
-                    if (diff > 180) diff = 360 - diff
-                    if (diff < 50) return // гистерезис 50°
-                    val snapped = ((degrees + 45) / 90 * 90) % 360
-                    if (snapped != cur) {
-                        deviceOrientationDegrees = snapped
-                        val orient = streamOrientation()
-                        glRenderer?.setOrientation(orient)
-                        val isLandscape = (orient == 0 || orient == 180)
-                        val statusJson = org.json.JSONObject()
-                            .put("orient", orient)
-                            .put("orientation", if (isLandscape) "horizontal" else "vertical")
-                            .put("facing", currentCameraFacingName)
-                            .put("width", targetWidth)
-                            .put("height", targetHeight)
-                            .put("fps", targetFps)
-                            .toString()
-                        streamer?.enqueueStatus(statusJson)
-                        streamer?.requestKeyFrame()
-                        Log.i("ROUTING_DEBUG", "[Sensor] Авто-ориентация телефона: snapped=$snapped°, orient=$orient ($degrees°)")
+            val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            val accel = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            if (sm != null && accel != null) {
+                accelSensorListener = object : SensorEventListener {
+                    private var lastTick = 0L
+                    override fun onSensorChanged(event: SensorEvent?) {
+                        if (event == null) return
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastTick < 80L) return
+                        lastTick = now
+
+                        // Идентично системному Android OrientationEventListener:
+                        val x = -event.values[0]
+                        val y = -event.values[1]
+                        val magnitude = x * x + y * y
+
+                        // Если телефон лежит на столе (плоско), ориентацию не меняем (вектор в плоскости XY мал)
+                        if (magnitude < 2.0f) return
+
+                        // Угол поворота устройства в градусах (0..359):
+                        // 0 = вертикально (портрет), 90 = альбом (поворот по часовой, верх справа),
+                        // 180 = вертикально вверх ногами, 270 = альбом (поворот против часовой, верх слева)
+                        val angleRad = Math.atan2(-y.toDouble(), x.toDouble())
+                        var orientation = 90 - Math.round(angleRad * (180.0 / Math.PI)).toInt()
+                        while (orientation >= 360) orientation -= 360
+                        while (orientation < 0) orientation += 360
+
+                        // Симметричный гистерезис +-55° от текущей ориентации:
+                        // предотвращает дребезг и случайные переключения
+                        val cur = deviceOrientationDegrees
+                        val diffFromCur = Math.abs((orientation - cur + 540) % 360 - 180)
+                        if (diffFromCur < 55) {
+                            return
+                        }
+
+                        val targetSnapped = ((orientation + 45) / 90 * 90) % 360
+                        updateOrientationFromSnapped(targetSnapped)
                     }
+                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
                 }
-            }.apply {
-                if (canDetectOrientation()) {
-                    enable()
-                    Log.i("ROUTING_DEBUG", "OrientationEventListener успешно запущен")
+                sm.registerListener(accelSensorListener, accel, SensorManager.SENSOR_DELAY_UI)
+                Log.i("ROUTING_DEBUG", "Акселерометр для ориентации успешно запущен")
+            } else {
+                // Резервный системный OrientationEventListener (только если нет акселерометра)
+                orientationListener = object : OrientationEventListener(this, SensorManager.SENSOR_DELAY_NORMAL) {
+                    override fun onOrientationChanged(degrees: Int) {
+                        if (degrees == ORIENTATION_UNKNOWN) return
+                        val snapped = ((degrees + 45) / 90 * 90) % 360
+                        updateOrientationFromSnapped(snapped)
+                    }
+                }.apply {
+                    if (canDetectOrientation()) {
+                        enable()
+                        Log.i("ROUTING_DEBUG", "OrientationEventListener успешно запущен (fallback)")
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -1218,6 +1270,12 @@ class FloatingCameraService : Service(),
             orientationListener?.disable()
         } catch (_: Exception) {}
         orientationListener = null
+
+        try {
+            val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            accelSensorListener?.let { sm?.unregisterListener(it) }
+        } catch (_: Exception) {}
+        accelSensorListener = null
     }
 
     fun setAutoFramingEnabled(enabled: Boolean) {
@@ -2271,6 +2329,7 @@ class FloatingCameraService : Service(),
         if (isConnected) {
             updateNotification("Трансляция активна ($targetWidth x $targetHeight)")
             overlayController?.setStatus(OverlayController.Status.STREAMING)
+            sendCurrentOrientationStatus()
         } else {
             updateNotification("Ожидание подключения ПК...")
             overlayController?.setStatus(OverlayController.Status.WAITING)

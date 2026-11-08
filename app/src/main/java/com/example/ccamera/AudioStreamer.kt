@@ -70,6 +70,7 @@ class AudioStreamer(
                     try {
                         val socket = ss.accept()
                         socket.tcpNoDelay = true
+                        socket.trafficClass = 0x10
                         socket.sendBufferSize = 64 * 1024
 
                         synchronized(this) {
