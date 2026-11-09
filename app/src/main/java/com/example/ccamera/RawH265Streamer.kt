@@ -248,6 +248,11 @@ class RawH265Streamer(
         this.frameRate = newFps
         this.bitRate = newBitrate
 
+        flushVideoQueue()
+        synchronized(this) {
+            cachedCsdBuffer = null
+        }
+
         stopCodecOnly()
         initMediaCodec()
         return inputSurface

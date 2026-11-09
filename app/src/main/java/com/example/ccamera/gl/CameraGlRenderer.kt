@@ -117,6 +117,8 @@ class CameraGlRenderer(
     var orientationDegrees: Int = 0
     @Volatile
     var isFrontCamera: Boolean = false
+    @Volatile
+    private var lastPresentationTimeNs: Long = 0L
 
     private val codecTexMatrix = FloatArray(16)
     private val cancelRotMatrix = FloatArray(16)
@@ -241,7 +243,16 @@ class CameraGlRenderer(
         try {
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
-            val ptsNs = st.timestamp
+            val rawPts = st.timestamp
+            val nowNs = System.nanoTime()
+            val ptsNs = if (rawPts > lastPresentationTimeNs && (rawPts - lastPresentationTimeNs) < 2_000_000_000L) {
+                rawPts
+            } else if (nowNs > lastPresentationTimeNs) {
+                nowNs
+            } else {
+                lastPresentationTimeNs + 16_666_667L
+            }
+            lastPresentationTimeNs = ptsNs
 
             autoFraming.updateMatrix()
 
@@ -321,6 +332,7 @@ class CameraGlRenderer(
                     previewWindowSurface = null
                     codecWindowSurface?.release()
                     codecWindowSurface = null
+                    lastPresentationTimeNs = 0L
 
                     if (textureId != 0) {
                         GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)

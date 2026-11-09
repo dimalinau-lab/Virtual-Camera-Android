@@ -1,0 +1,19 @@
+## VirtualCamNative v3.0.0
+
+### Русский
+Было пофикшено множество багов и добавлены некоторые полезные улучшения.
+
+#### Контрольные суммы (SHA-256)
+- `VirtualCamNative_Setup_v3.0.0.exe`: `E3246B49F295FE24E49817CA7A61915D4365E3BE59232FDCDE8A3B3F371FE7A1`
+- `VirtualCam-v3.0.0.apk`: `20092171A71694079233A4364BDA59AF19F567D52B68FC1D583FB112163BCDCB`
+- `VirtualCamNative_Update.zip`: `84D8AB67F05AFCA5EACFD1048A07F2630B3EB6AB32FBE3BF2D7CB36EC29F74EB`
+
+---
+
+### English
+Multiple bugs have been fixed and several useful improvements have been added.
+
+#### Checksums (SHA-256)
+- `VirtualCamNative_Setup_v3.0.0.exe`: `E3246B49F295FE24E49817CA7A61915D4365E3BE59232FDCDE8A3B3F371FE7A1`
+- `VirtualCam-v3.0.0.apk`: `20092171A71694079233A4364BDA59AF19F567D52B68FC1D583FB112163BCDCB`
+- `VirtualCamNative_Update.zip`: `84D8AB67F05AFCA5EACFD1048A07F2630B3EB6AB32FBE3BF2D7CB36EC29F74EB`

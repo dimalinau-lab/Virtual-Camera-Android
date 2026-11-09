@@ -1,103 +1,90 @@
-# VirtualCamNative (Android Companion App) 🚀
+# VirtualCamNative - Android Companion Engine
 
-> **Ultra-Low-Latency, Hardware-Accelerated HEVC Wireless & USB Video & Audio Streamer for Windows Virtual Camera.**
+> Ultra-Low-Latency, Hardware-Accelerated HEVC Wireless and USB Video and Audio Streamer for Windows Virtual Camera.
 
 <p align="center">
   <b>Language / Мова / Язык:</b><br>
-  <a href="#virtualcamnative-android-companion-app-">English</a> • 
-  <a href="#-virtualcamnative-android--руководство-на-русском">Русский</a> • 
-  <a href="#-virtualcamnative-android--посібник-українською">Українська</a>
+  <a href="#virtualcamnative---android-companion-engine">English</a> • 
+  <a href="#virtualcamnative-android---руководство-на-русском">Русский</a> • 
+  <a href="#virtualcamnative-android---посібник-українською">Українська</a>
 </p>
 
-[![Android Platform](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026--35)-3DDC84.svg?style=for-the-badge&logo=android)](https://developer.android.com/)
-[![Video Codec](https://img.shields.io/badge/Encoder-MediaCodec%20HEVC%20%2F%20H.265-orange.svg?style=for-the-badge)](https://developer.android.com/reference/android/media/MediaCodec)
-[![Camera API](https://img.shields.io/badge/Capture-Camera2%20Zero--Copy-blue.svg?style=for-the-badge)](https://developer.android.com/reference/android/hardware/camera2/package-summary)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![PC Client](https://img.shields.io/badge/PC%20Client-VirtualCamNative%20(C%2B%2B20)-0078D6.svg?style=for-the-badge&logo=windows)](https://github.com/dimalinau-lab/Virtual-Camera)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg?style=flat-square)](https://github.com/dimalinau-lab/Virtual-Camera/releases)
+[![Android Platform](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026--35)-3DDC84.svg?style=flat-square&logo=android)](https://developer.android.com/)
+[![Video Codec](https://img.shields.io/badge/Encoder-MediaCodec%20HEVC%20%2F%20H.265-orange.svg?style=flat-square)](https://developer.android.com/reference/android/media/MediaCodec)
+[![Camera API](https://img.shields.io/badge/Capture-Camera2%20Zero--Copy-blue.svg?style=flat-square)](https://developer.android.com/reference/android/hardware/camera2/package-summary)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![PC Client](https://img.shields.io/badge/PC%20Client-VirtualCamNative%20(C%2B%2B20)-0078D6.svg?style=flat-square&logo=windows)](https://github.com/dimalinau-lab/Virtual-Camera)
 
-**VirtualCamNative Android** is a zero-cost, open-source, ultra-low latency mobile streaming engine designed to replace proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, zero-copy **Camera2 API** surface pipelines, and the companion **C++20 Windows desktop driver** ([VirtualCamNative](https://github.com/dimalinau-lab/Virtual-Camera)), it streams smooth 1080p/4K 60 FPS video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with ultra-low latency (< 30 ms).
+<p align="center">
+  <img src="docs/images/phone_screen.png" alt="VirtualCam Android Viewfinder" width="340">
+  <br>
+  <em>VirtualCam Android Viewfinder (Hardware Camera2 multi-lens selector, live battery telemetry, and OLED blackout control)</em>
+</p>
 
-## 🚀 What's New in v2.4.1
+<p align="center">
+  <img src="docs/images/pc_interface.png" alt="VirtualCamNative Desktop Interface" width="820">
+  <br>
+  <em>VirtualCamNative Desktop Dashboard (DirectShow/Media Foundation receiver with 60 FPS GPU acceleration)</em>
+</p>
 
-- 📱 **Smart Floating Window Control & LED Indicator**: Dedicated glassmorphic toggle pill and action bar button with dynamic LED indicator (Emerald Green when active, Zinc Gray when disabled) to switch between full overlay streaming and background standby.
-- 🍃 **Graceful Background Suspension & Zero Battery Drain**: When floating mode is disabled, minimizing the app cleanly pauses the Camera2 hardware sensor and halts H.265 encoding, turning off the phone's camera privacy LED and conserving battery life without killing the application.
-- ⚡ **Instant Resume & Reconnect**: Restoring the app instantly rebinds the camera session and resumes encoding in < 20 ms without any reloading glitches or crashes.
-- 🛡️ **Samsung One UI & Android 14 Lifecycle Fix**: Resolved a critical lifecycle issue where synthetic `onUserLeaveHint` / `onStop` transitions during launch caused unintended shutdown loops on modern Samsung devices.
-
-## 🚀 What's New in v2.4.0
-
-- 🤳 **Unlocked 60 FPS on Front (Selfie) Camera**: Removed the legacy 30 FPS ceiling on the selfie sensor, allowing full 60 FPS target rate and `[60, 60]` AE capture range selection.
-- 💾 **1080p Resolution & Camera Facing State Persistence**: Settings are automatically stored in `SharedPreferences`, ensuring the companion service always starts up in crisp 1080p 60 FPS on your preferred camera without resetting to defaults.
-- ⚡ **Enhanced MediaCodec & Camera2 Stability**: Hardened lifecycle management and zero-copy surface exchange prevents capture session drops during dynamic format transitions.
-
----
-
-## 🚀 What's New in v2.2.0
-
-- 🔄 **In-App Auto-Update System**: Automatically checks the GitHub Releases API on startup for newer versions (`UpdateManager`). Displays an animated notification card with a real-time download progress bar and invokes the native Android PackageInstaller via `FileProvider`.
-- 📱 **Samsung Flagships & Display Cutout Safe Area Clearance**: Dynamically calculates punch-hole camera cutouts, curved display corners, and status bars using `WindowInsetsCompat`. Calibrated for **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, Nothing Phone, and Pixel** devices so status badges ("В ЭФИРЕ", "32°C") never clip edges or collide with Samsung One UI green privacy camera dots.
-- 🪟 **Floating PIP & Multi-App Overlay Widget**: Glassmorphic preview card running smoothly over any Android application with magnetic snap-to-edge dragging, one-tap mic mute, lens flip, eco blackout, and fullscreen restoration.
-- 🌡️ **Real-Time Battery Thermal Guard**: Live hardware battery sensor temperature display (`🌡️ 32°C`) in header badges and telemetry JSON with severe overheating warnings (`🔥 ПЕРЕГРЕВ` at >= 42°C).
-- 🎚️ **Pro Camera Manual Controls via REST API**:
-  - `/api/manual_exposure`: Manual ISO control (100–3200) and exposure time in nanoseconds.
-  - `/api/manual_focus`: Continuous manual focal distance control (macro to infinity).
-  - `/api/awb`: Auto White Balance mode switching (auto, incandescent, fluorescent, daylight, cloudy, etc.).
-- 📦 **Pre-Built Release APK**: Ready-to-install binary `VirtualCam-v2.2.0.apk` included directly in repository root.
+**VirtualCamNative Android** is a zero-cost, open-source, ultra-low latency mobile streaming engine designed to replace proprietary apps like DroidCam and Iriun. By leveraging **hardware-accelerated HEVC (H.265) encoding** via Android's `MediaCodec`, zero-copy **Camera2 API** surface pipelines, and the companion **C++20 Windows desktop driver** ([VirtualCamNative](https://github.com/dimalinau-lab/Virtual-Camera)), it streams smooth 1080p/4K 60 FPS video directly into **Discord, OBS Studio, Zoom, Telegram, and WebRTC browsers** with ultra-low latency (~10–15 ms over USB, < 30 ms over Wi-Fi).
 
 ---
 
-## 🌟 Key Features
+## Technical Specifications
 
-- ⚡ **Ultra-Low Latency (< 30 ms Glass-to-Glass)**  
-  Custom raw TCP transport layer (`TCP_NODELAY`, optimized 64 KB non-blocking socket buffers) paired with advanced `MediaCodec` low-latency tuning (`KEY_LOW_LATENCY`, `KEY_LATENCY=0`, Zero B-Frames, real-time thread priority, and max operating rate).
-- 🔍 **Multi-Lens Switching & Hardware Zoom**  
-  Direct physical camera module selection: **0.5x Ultra-Wide**, **1x Wide**, and **2x / 3x Telephoto** via Camera2 `CONTROL_ZOOM_RATIO` and multi-camera physical sensor IDs.
-- 🎚️ **Pro Manual Camera Controls (v2.2.0)**  
-  Fine-grained control over exposure time, ISO sensitivity, manual focus distance, and Auto White Balance presets directly from the PC client without touching the phone.
-- 🛡️ **Secure Device Pairing & Auth Tokens**  
-  Interactive system pairing via `/api/pair`: new PC clients trigger an `AlertDialog` prompt on the phone screen. Upon approval, a persistent UUID `auth_token` is generated and saved in `SharedPreferences`. Wi-Fi streaming enforces token verification on `/api/connect`, while USB ADB is natively trusted.
-- 🚀 **Hardware HEVC / H.265 Compression**  
-  Uses Android's GPU `MediaCodec` hardware encoder (CBR mode with 1s I-frame interval) to maximize image sharpness and save network bandwidth while eliminating CPU thermal throttling on mobile devices.
-- 📱 **Live Local Viewfinder & OLED Blackout Mode**  
-  Simultaneously routes zero-copy frames to both the hardware encoder and the local phone screen (`SurfaceView`/`TextureView`). Includes a tap-to-wake hardware screen blackout overlay (`0.01f` backlight) to prevent OLED burn-in and conserve battery during long streaming sessions.
-- 🔄 **Instant Orientation, FPS & Resolution Switching**  
-  Switch between landscape/portrait aspect ratios, adjust resolutions (720p/1080p/4K), or toggle FPS (30/60) dynamically. The pure `Camera2` implementation hot-swaps active capture sessions without tearing down the underlying `CameraDevice` or dropping the TCP socket.
-- 📡 **Dual Connection Modes & Auto-Discovery**  
-  - **USB Mode:** Zero-lag streaming via automatic ADB port forwarding (`8080`, `8554`, `8555`).  
-  - **Wi-Fi Mode:** Automatic local network device discovery via **UDP Beacon Broadcasting** (`255.255.255.255:8888`) every 1.5s sending device metadata — no manual IP entry required.
-- 🎙️ **Crystal-Clear Raw PCM Audio Stream**  
-  Captures 48 kHz 16-bit mono/stereo audio with hardware noise suppressor flags, transmitting raw PCM over a dedicated TCP stream directly to the Windows WASAPI / DirectShow audio filter.
-- 🛡️ **Foreground Service & Thread Safety**  
-  Runs inside a dedicated Android `Foreground Service` protected by `PARTIAL_WAKE_LOCK` and `WIFI_MODE_FULL_HIGH_PERF`. All hardware lifecycle events execute safely on an isolated `HandlerThread` to prevent Main Thread blocks and HAL crashes.
-- 📱 **Samsung Flagships & Modern Cutout Safe Area Insets (v2.2.0)**  
-  Dynamically adapts to display punch-hole camera cutouts, curved screen edges, and status bars using `WindowInsetsCompat`. Specially calibrated for modern flagships including **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra, Note, and Pixel** devices so indicators never overlap with camera holes or One UI privacy dots.
-- 🪟 **Floating PIP & Multi-App Overlay Widget (v2.2.0)**  
-  Draggable, magnetic floating camera preview widget running smoothly above any other Android application, featuring one-tap mic mute, lens flip, eco blackout, and instant return to fullscreen.
-- 🌡️ **Real-Time Battery Thermal Guard (v2.2.0)**  
-  Monitors smartphone hardware battery temperature (`🌡️ 32°C`) directly in the header HUD and status badges, alerting when temperatures reach severe levels (`🔥 ПЕРЕГРЕВ` at >= 42°C).
-- 🔘 **Minimalist Floating Status Widget**  
-  Includes a draggable, magnetic snap-to-edge floating dot overlay with glowing pulsation indicators for streaming status (Yellow: Waiting, Green: Live, Red: Error).
+| Parameter | Specification | Details |
+| :--- | :--- | :--- |
+| **Video Resolutions** | 1080p FHD (1920x1080), 4K UHD (3840x2160), 720p HD (1280x720) | Dynamic reconfiguration via REST API without tearing down sessions |
+| **Frame Rates** | 60 FPS, 30 FPS | Hardware 60 FPS capture range `[60, 60]` and unthrottled selfie sensor |
+| **Glass-to-Glass Latency** | ~10–15 ms (USB 3.0), < 30 ms (Wi-Fi 5 GHz) | Zero-copy Camera2 Surface to MediaCodec input buffer pipeline |
+| **Video Encoder** | Android MediaCodec HEVC (H.265) | Hardware CBR encoding with real-time priority and low-latency flags |
+| **Audio Capture** | 48 kHz, 16-bit Mono/Stereo PCM | Native AudioRecord stream with hardware noise suppression |
+| **Network Ports** | `8080` (Control Server), `8554` (Video TCP), `8555` (Audio TCP), `8888` (UDP Discovery), `8000` (PC UI) | Automatic ADB port forwarding over USB |
+| **Target SDK** | Android 15 (API 35) | Minimum Android 8.0 (API 26) |
+| **Release Artifact** | `VirtualCam-v3.0.0.apk` | Companion to `VirtualCamNative_Setup_v3.0.0.exe` |
 
 ---
 
-## 📊 Comparison with Existing Solutions
+## Key Features
 
-| Feature | **VirtualCamNative (Android)** | DroidCam | Iriun Cam |
+- **Ultra-Low Latency (~10–15 ms USB, < 30 ms Wi-Fi)**: Custom raw TCP transport layer (`TCP_NODELAY`, optimized 64 KB non-blocking socket buffers) paired with advanced `MediaCodec` low-latency tuning (`KEY_LOW_LATENCY`, `KEY_LATENCY=0`, Zero B-Frames, real-time thread priority).
+- **Multi-Lens Switching & Hardware Zoom**: Direct physical camera module selection: **0.5x Ultra-Wide**, **1x Wide**, **2x / 3x / 5x Telephoto**, **Macro**, and **Selfie** via Camera2 `CONTROL_ZOOM_RATIO` and vendor auxiliary sensor IDs.
+- **Pro Manual Camera Controls**: Fine-grained control over exposure time, ISO sensitivity (100–3200), manual optical focus distance, and Auto White Balance presets directly from the PC client without touching the phone.
+- **Secure Device Pairing & Auth Tokens**: Interactive pairing via `/api/pair`: new PC clients trigger an `AlertDialog` prompt on the phone screen. Upon approval, a persistent UUID `auth_token` is generated and saved in `SharedPreferences`. Wi-Fi streaming enforces token verification, while USB ADB is natively trusted.
+- **Hardware HEVC / H.265 Compression**: Uses Android's GPU `MediaCodec` hardware encoder (CBR mode with 1s I-frame interval) to maximize image sharpness and save network bandwidth while eliminating CPU thermal throttling on mobile devices.
+- **Live Local Viewfinder & OLED Blackout Mode**: Simultaneously routes zero-copy frames to both the hardware encoder and the local phone screen. Includes a tap-to-wake hardware screen blackout overlay (`0.01f` backlight) to prevent OLED burn-in and conserve battery during long streaming sessions.
+- **Instant Orientation, FPS & Resolution Switching**: Switch between landscape/portrait aspect ratios, adjust resolutions (720p/1080p/4K), or toggle FPS (30/60) dynamically. The pure `Camera2` implementation hot-swaps active capture sessions without tearing down the underlying `CameraDevice` or dropping the TCP socket.
+- **Dual Connection Modes & Auto-Discovery**:
+  - **USB Mode:** Zero-lag streaming via automatic ADB port forwarding (`8080`, `8554`, `8555`).
+  - **Wi-Fi Mode:** Automatic local network device discovery via **UDP Beacon Broadcasting** (`255.255.255.255:8888`) every 1.5s sending device metadata - no manual IP entry required.
+- **Crystal-Clear Raw PCM Audio Stream**: Captures 48 kHz 16-bit audio with hardware noise suppressor flags, transmitting raw PCM over a dedicated TCP stream directly to the Windows DirectShow audio filter.
+- **Foreground Service & Thread Safety**: Runs inside a dedicated Android Foreground Service protected by `PARTIAL_WAKE_LOCK` and `WIFI_MODE_FULL_HIGH_PERF`. All hardware lifecycle events execute safely on an isolated `HandlerThread` to prevent Main Thread blocks and HAL crashes.
+- **Samsung One UI & Display Cutout Inset Support**: Dynamically adapts to display punch-hole camera cutouts, curved screen edges, and status bars using `WindowInsetsCompat`. Calibrated for Samsung Galaxy A and S series devices so indicators never overlap with camera holes or One UI privacy dots.
+- **Floating PIP & Multi-App Overlay Widget**: Draggable, magnetic floating camera preview widget running smoothly above any other Android application, featuring one-tap mic mute, lens flip, eco blackout, and instant return to fullscreen.
+- **Real-Time Battery Thermal Guard**: Live hardware battery sensor temperature display (`32°C`) in header badges and telemetry JSON with severe overheating warnings (`OVERHEAT` at >= 42°C).
+
+---
+
+## Comparison with Existing Solutions
+
+| Feature | VirtualCamNative (Android) | DroidCam | Iriun Cam |
 | :--- | :---: | :---: | :---: |
 | **Video Codec** | **HEVC / H.265 (Hardware)** | H.264 / MJPEG | H.264 / MJPEG |
-| **Glass-to-Glass Latency** | **Ultra-Low (< 30 ms)** | ~100 ms – 200 ms | ~80 ms – 150 ms |
-| **Physical Multi-Lens (0.5x/1x/2x)** | **Yes (Camera2 Hardware API)** | No | No |
+| **Glass-to-Glass Latency** | **Ultra-Low (~10–15 ms USB)** | ~100 ms – 200 ms | ~80 ms – 150 ms |
+| **Physical Multi-Lens (0.5x/1x/2x/Macro)** | **Yes (Camera2 Hardware API)** | No | No |
 | **Native DirectShow Driver** | **Yes (Pure C++20 COM DLL)** | Yes (Proprietary) | Yes (Proprietary) |
 | **Client Pairing & Security** | **Yes (Token Auth & Modal Alert)** | No | No |
 | **OLED Battery Burn-in Saver** | **Yes (0.01f Backlight Overlay)** | Paid Feature | Not Available |
 | **Wi-Fi Auto-Discovery** | **Yes (UDP Beacon :8888)** | Partial | Yes |
-| **Ads / Resolution Limits** | **None (Full 1080p/4K Unlocked)** | HD Locked / Ads | Watermarked / Paid |
+| **Resolution / FPS Limits** | **None (Full 1080p/4K 60 FPS Unlocked)** | HD Locked / Ads | Watermarked / Paid |
 | **Instant Aspect / Config Switch** | **Yes (Zero-Disconnect)** | Requires Disconnect | Requires Restart |
 | **License** | **100% Free & Open Source (MIT)** | Closed Source | Closed Source |
 
 ---
 
-## 📐 System Architecture
+## System Architecture
 
 ```text
  +---------------------------------------------------------------------------------+
@@ -119,13 +106,13 @@
  +---------------------------------------------------------------------------------+
  |                        VIRTUALCAMNATIVE PC CLIENT (C++20)                       |
  |                                                                                 |
- |  [ TcpReceiver ]               [ AudioReceiver (WASAPI / VB-Cable) ]            |
+ |  [ TcpReceiver ]               [ AudioReceiver (DirectShow Virtual Mic) ]       |
  |         │                                                                       |
  |         ▼ (Anti-Bufferbloat Queue Guard)                                        |
  |  [ NvdecDecoder (FFmpeg Low-Delay) ]                                            |
  |         │                                                                       |
  |         ▼                                                                       |
- |  [ 64x64 Block Rotator ] ───►  [ AVX2 NV12 Blender (60 FPS) ]                   |
+ |  [ 64x64 Block Rotator ] ───►  [ D3D11 / AVX2 NV12 Blender (60 FPS) ]           |
  |         │                                   │                                   |
  |         ▼                                   ▼                                   |
  |  [ Local MJPEG Preview :8000 ]     [ Win32 Shared Memory MMF ]                  |
@@ -151,11 +138,11 @@
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
-- 📦 **Pre-Built APK (Fastest):** Download and install [`VirtualCam-v2.2.0.apk`](VirtualCam-v2.2.0.apk) directly on your device (also available in [Releases](https://github.com/dimalinau-lab/Virtual-Camera-Android/releases)).
-- 🛠️ **Build from Source:** See [Building from Source](#️-building-from-source).
+- **Pre-Built APK (Fastest):** Download and install [`VirtualCam-v3.0.0.apk`](https://github.com/dimalinau-lab/Virtual-Camera/releases) directly on your device.
+- **Build from Source:** See [Building from Source](#building-from-source).
 
 ### USB Mode (Lowest Latency & Maximum Stability)
 1. Enable **USB Debugging** on your phone (*Settings -> Developer Options -> USB Debugging*).
@@ -172,9 +159,9 @@
 
 ---
 
-## 🌐 Control Server REST API
+## Control Server REST API
 
-The Android client runs an embedded HTTP REST server on port `8080` (`ControlServer`) to manage client authorization, remote configuration, and hardware execution without socket resets.
+The Android client runs an embedded HTTP REST server on port `8080` (`ControlServer`) to manage client authorization, remote configuration, and hardware execution:
 
 | Endpoint | Method | Request Payload / Params | Description |
 | :--- | :---: | :--- | :--- |
@@ -182,10 +169,10 @@ The Android client runs an embedded HTTP REST server on port `8080` (`ControlSer
 | `/api/unpair` | `POST` | `{"token": "...", "client_id": "..."}` | Revokes pairing for the specified client and removes the token from `SharedPreferences`. |
 | `/api/status` | `GET` | - | Returns JSON status: streaming state, camera facing, torch, mic mute, battery level, battery temp (°C), thermal status, charging flag, manual ISO, exposure time ns, focus distance, and AWB mode. |
 | `/api/connect` | `POST` | `{"mode": "usb" \| "wifi", "auth_token": "..."}` | Validates `auth_token` for Wi-Fi connections (USB ADB is trusted). Wakes video encoder and requests an immediate IDR keyframe. |
-| `/api/disconnect` | `POST` | - | Safely pauses the video streamer and drops the client socket (Camera continues running in background). |
+| `/api/disconnect` | `POST` | - | Safely pauses video streamer and drops client socket. |
 | `/api/config` | `POST` | `{"resolution": "1080p", "fps": 60, "bitrate": 10000000}` | Updates encoder resolution (`720p`, `1080p`, `4k`), FPS, and bitrate dynamically with 300ms debouncing. |
 | `/api/action` | `POST` | `{"action": "switch_camera" \| "toggle_torch" \| "toggle_blackout" \| "toggle_mic_mute"}` | Toggles front/back camera, torch LED, screen blackout mode, or microphone mute. |
-| `/api/lens` | `GET` / `POST` | `?lens=0.5x \| 1x \| 2x` | Switches physical camera sensor optics on the smartphone live. |
+| `/api/lens` | `GET` / `POST` | `?lens=0.5x \| 1x \| 2x \| 3x \| 5x \| macro \| front` | Switches camera sensor optics on the smartphone live. |
 | `/api/orientation` | `GET` / `POST` | `?mode=vertical \| horizontal` | Instantly switches frame orientation without dropping the TCP socket. |
 | `/api/manual_exposure` | `POST` | `{"iso": 400, "exposure_time_ns": 16666667}` | Configures manual ISO sensitivity (100–3200) and shutter exposure time in nanoseconds. |
 | `/api/manual_focus` | `POST` | `{"focus_distance": 2.5}` | Configures manual optical focal distance (0.0 to max diopters). |
@@ -213,7 +200,7 @@ curl -X POST http://192.168.1.45:8080/api/action -d '{"action":"toggle_blackout"
 
 ---
 
-## 🛠️ Building from Source
+## Building from Source
 
 ### Requirements
 - **Toolchain:** Android Studio Jellyfish / 2024.1+, JDK 17, Gradle 8.x.
@@ -221,223 +208,206 @@ curl -X POST http://192.168.1.45:8080/api/action -d '{"action":"toggle_blackout"
 
 ```bash
 # Clone the repository
-git clone https://github.com/dimalinau-lab/Virtual-Camera-Android.git
-cd Virtual-Camera-Android
+git clone https://github.com/dimalinau-lab/Virtual-Camera.git
+cd Virtual-Camera/android
 
 # Build Debug APK
 ./gradlew assembleDebug
+
+# Build Release APK
+./gradlew assembleRelease
 ```
-The compiled APK will be located at `app/build/outputs/apk/debug/app-debug.apk`.
+Compiled APKs are output to `app/build/outputs/apk/`.
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
-<details>
-<summary><b>1. Pairing prompt does not appear on phone screen</b></summary>
-<br>
-Ensure <code>VirtualCamNative</code> has been granted <b>"Display over other apps"</b> (<code>SYSTEM_ALERT_WINDOW</code>) permission in Android system settings so the background service can show modal prompts.
-</details>
-
-<details>
-<summary><b>2. Frame rate drops or stuttering on Wi-Fi</b></summary>
-<br>
-- Use a 5 GHz Wi-Fi network rather than congested 2.4 GHz.<br>
-- Ensure battery optimization is disabled for VirtualCamNative so Android does not throttle background CPU performance.
-</details>
-
-<details>
-<summary><b>3. Resolution error when switching to 4K</b></summary>
-<br>
-Ensure your device camera sensor and hardware HEVC encoder support 4K 60 FPS. If not supported by the hardware HAL, the app falls back to 1080p 60 FPS safely.
-</details>
+- **Pairing prompt does not appear on phone screen**: Ensure `VirtualCamNative` has been granted **"Display over other apps"** (`SYSTEM_ALERT_WINDOW`) permission in Android system settings.
+- **Frame rate drops or stuttering on Wi-Fi**: Use a 5 GHz Wi-Fi network rather than congested 2.4 GHz. Disable battery optimization for VirtualCamNative so Android does not throttle background CPU performance.
+- **Resolution error when switching to 4K**: Ensure your device camera sensor and hardware HEVC encoder support 4K 60 FPS. If not supported by the hardware HAL, the app falls back to 1080p 60 FPS safely.
 
 ---
 
-## 📄 License
+## License
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more information.
 
 ---
 ---
 
-# 🇷🇺 VirtualCamNative (Android) — Руководство на русском
+# VirtualCamNative (Android) - Руководство на русском
 
-> **Мобильное приложение для Android: аппаратный HEVC-стример видео и звука со сверхнизкой задержкой для ПК.**
+> Мобильное приложение для Android: аппаратный HEVC-стример видео и звука со сверхнизкой задержкой для ПК.
 
-**VirtualCamNative для Android** — это бесплатное приложение с открытым исходным кодом, превращающее ваш смартфон в премиальную веб-камеру для ПК. В отличие от DroidCam и Iriun, приложение задействует аппаратный энкодер **HEVC (H.265)** через Android `MediaCodec`, прямой доступ к сенсорам через **Camera2 API** и передает видео и 48 кГц PCM-звук на ПК с задержкой менее 30 мс.
+<p align="center">
+  <img src="docs/images/phone_screen.png" alt="Видоискатель VirtualCam для Android" width="340">
+  <br>
+  <em>Видоискатель VirtualCam для Android (чистый интерфейс без системной строки статуса, аппаратное переключение камер, термометрия и режим защиты OLED)</em>
+</p>
 
----
+<p align="center">
+  <img src="docs/images/pc_interface.png" alt="Интерфейс VirtualCamNative для ПК" width="820">
+  <br>
+  <em>Панель управления VirtualCamNative для ПК (DirectShow/Media Foundation приемник с 60 FPS ускорением на GPU)</em>
+</p>
 
-## 🚀 Что нового в версии v2.4.1
-
-- 📱 **Интуитивный переключатель режима поверх окон и LED-индикатор**: Стеклянная плашка со светодиодным индикатором (изумрудный — включено, нейтральный серый — выключено) для быстрого управления поведением при сворачивании.
-- 🍃 **Штатная пауза в фоне и нулевой расход батареи**: При выключенном режиме оверлея сворачивание приложения корректно освобождает сенсор камеры и останавливает энкодер H.265. Зеленый индикатор приватности гаснет, батарея не тратится, а само приложение безопасно остается в фоне.
-- ⚡ **Мгновенное возобновление**: При возврате в приложение камера и видоискатель переоткрываются менее чем за 20 мс без перезагрузок и черных экранов.
-- 🛡️ **Исправление жизненного цикла на Samsung One UI**: Устранено циклическое падение при старте, возникавшее из-за транзитных вызовов `onUserLeaveHint` / `onStop` оболочки One UI при выключенном оверлее.
-
-## 🚀 Что нового в версии v2.4.0
-
-- 🤳 **Честные 60 FPS на фронтальной (селфи) камере**: Снято системное ограничение в 30 кадров/с на фронтальном модуле — доступен полноценный режим 60 FPS и фиксированный диапазон автоэкспозиции `[60, 60]`.
-- 💾 **Сохранение разрешения 1080p и выбранной камеры**: Параметры сохраняются в `SharedPreferences` и автоматически восстанавливаются при каждом перезапуске.
-- ⚡ **Повышение стабильности Camera2 и MediaCodec**: Защита от сбоев при переключении модулей и горячей смене ориентации.
+**VirtualCamNative для Android** — это бесплатное приложение с открытым исходным кодом, превращающее ваш смартфон в высококлассную веб-камеру для ПК. В отличие от DroidCam и Iriun, приложение задействует аппаратный энкодер **HEVC (H.265)** через Android `MediaCodec`, прямой доступ к сенсорам через **Camera2 API** и передает видео и 48 кГц PCM-звук на ПК с задержкой ~10–15 мс по USB и менее 30 мс по Wi-Fi.
 
 ---
 
-## 🌟 Ключевые возможности
+## Технические характеристики
 
-- ⚡ **Сверхнизкая задержка (< 30 мс по USB и Wi-Fi 5 ГГц)**  
-  Оптимизированный сокет TCP (`TCP_NODELAY`, буфер 64 КБ), тюнинг энкодера (`KEY_LOW_LATENCY`, нулевые B-кадры, максимальный приоритет потока).
-- 🔍 **Переключение физических линз камеры (0.5x / 1x / 2x)**  
-  Прямой доступ к сверхширокоугольному, основному и телефото-объективам смартфона через аппаратный `CONTROL_ZOOM_RATIO`.
-- 🎚️ **Ручные настройки съемки Pro Manual (v2.2.0)**  
-  Дистанционное управление выдержкой, ISO, дистанцией фокусировки и балансом белого прямо из интерфейса ПК без необходимости трогать телефон.
-- 🛡️ **Безопасное сопряжение и токен авторизации**  
-  При первой попытке подключения с нового ПК на экране телефона появляется системное диалоговое окно с подтверждением. Сгенерированный токен сохраняется в зашифрованных настройках.
-- 📱 **OLED Blackout — защита экрана от выгорания**  
-  Режим полного затемнения дисплея с минимальной яркостью (`0.01f`), предотвращающий нагрев батареи и выгорание OLED-матриц при долгих трансляциях.
-- 🔄 **Мгновенная смена ориентации и разрешения без разрыва сокета**  
-  Переключение между вертикальным/горизонтальным режимом, с разрешениями 720p, 1080p и 4K при 30 или 60 FPS прямо во время звонка.
-- 🎙️ **Чистый PCM-звук 48 кГц**  
-  Передача звука микрофона по отдельному TCP-порту `8555` с системным аппаратным шумоподавлением.
-- 📡 **Автоматическое обнаружение в сети (UDP Beacon :8888)**  
-  Приложение транслирует широковещательный маяк раз в 1.5 секунды — ПК сам находит телефон без ручного ввода IP-адресов.
-- 📱 **Адаптация под флагманы Samsung и Safe Area Insets (v2.2.0)**  
-  Динамический расчет безопасных зон (`WindowInsetsCompat`) под вырезы камер (punch-hole), скругленные углы и системный статус-бар. Идеально откалибровано под последние 3 поколения **Samsung Galaxy S22, S23, S24, S22/S23/S24 Ultra**, смартфоны Nothing, Pixel и Xiaomi — бейджи статуса «В ЭФИРЕ» и температуры больше не перекрываются индикатором приватности камеры One UI.
-- 🪟 **Плавающий оверлей и режим PiP (Картинка в картинке) (v2.2.0)**  
-  Возможность свернуть стример в компактный плавающий виджет поверх любых других приложений или стандартное системное окно PiP с быстрым переключением камеры и мутом микрофона.
-- 🌡️ **Термомониторинг и защита от перегрева (v2.2.0)**  
-  Отображение живой температуры аккумулятора (`🌡️ 32°C`) с автоматическим предупреждением о нагреве (`🔥 ПЕРЕГРЕВ` при >= 42°C).
+| Параметр | Значение | Описание |
+| :--- | :--- | :--- |
+| **Разрешения видео** | 1080p FHD (1920x1080), 4K UHD (3840x2160), 720p HD (1280x720) | Горячая смена параметров без разрыва сокета |
+| **Частота кадров** | 60 FPS, 30 FPS | Нативный диапазон `[60, 60]` и честные 60 FPS на селфи-модуле |
+| **Задержка (Glass-to-Glass)** | ~10–15 мс (USB 3.0), < 30 мс (Wi-Fi 5 ГГц) | Прямой Surface-конвейер Camera2 в энкодер MediaCodec |
+| **Видеоэнкодер** | Android MediaCodec HEVC (H.265) | Аппаратный CBR-энкодер с реальным временем и нулевыми B-кадрами |
+| **Аудиозахват** | 48 кГц, 16 бит PCM | Системный поток AudioRecord с аппаратным шумоподавлением |
+| **Сетевые порты** | `8080` (Phone API), `8554` (Video TCP), `8555` (Audio TCP), `8888` (UDP Discovery), `8000` (PC UI) | Автоматический проброс через ADB по USB |
+| **Требования к Android** | Android 8.0+ (API 26-35) | Целевой SDK 35 (Android 15) |
+| **Файл релиза** | `VirtualCam-v3.0.0.apk` | Полная совместимость с `VirtualCamNative_Setup_v3.0.0.exe` |
 
 ---
 
-## 🚀 Быстрый старт
+## Ключевые возможности
+
+- **Сверхнизкая задержка (~10–15 мс по USB, < 30 мс по Wi-Fi 5 ГГц)**: Оптимизированный сокет TCP (`TCP_NODELAY`, буфер 64 КБ), тюнинг энкодера (`KEY_LOW_LATENCY`, нулевые B-кадры, максимальный приоритет потока).
+- **Переключение физических линз камеры (0.5x / 1x / 2x / 3x / 5x / Макро / Селфи)**: Прямой доступ к сверхширокоугольному, основному, телефото и макро объективам смартфона через аппаратный `CONTROL_ZOOM_RATIO` и вендорные AUX-модули.
+- **Ручные настройки съемки Pro Manual**: Дистанционное управление выдержкой, ISO (100–3200), дистанцией фокусировки и балансом белого прямо из интерфейса ПК без необходимости трогать телефон.
+- **Безопасное сопряжение и токен авторизации**: При первой попытке подключения с нового ПК на экране телефона появляется системное диалоговое окно с подтверждением. Сгенерированный токен сохраняется в зашифрованных настройках.
+- **OLED Blackout — защита экрана от выгорания**: Режим полного затемнения дисплея с минимальной яркостью (`0.01f`), предотвращающий нагрев батареи и выгорание OLED-матриц при долгих трансляциях.
+- **Мгновенная смена ориентации и разрешения без разрыва сокета**: Переключение между вертикальным/горизонтальным режимом, с разрешениями 720p, 1080p и 4K при 30 или 60 FPS прямо во время звонка.
+- **Чистый PCM-звук 48 кГц**: Передача звука микрофона по отдельному TCP-порту `8555` с системным аппаратным шумоподавлением.
+- **Автоматическое обнаружение в сети (UDP Beacon :8888)**: Приложение транслирует широковещательный маяк раз в 1.5 секунды — ПК сам находит телефон без ручного ввода IP-адресов.
+- **Адаптация под вырезы экранов и One UI**: Динамический расчет безопасных зон (`WindowInsetsCompat`) под вырезы камер (punch-hole) и системный статус-бар. Индикаторы «В ЭФИРЕ» и температуры не перекрываются вырезами дисплея.
+- **Плавающий оверлей и режим PiP**: Возможность свернуть стример в компактный плавающий виджет поверх любых других приложений с быстрым переключением камеры и отключением микрофона.
+- **Термомониторинг и защита от перегрева**: Отображение живой температуры аккумулятора (`32°C`) с автоматическим предупреждением о нагреве при >= 42°C.
+
+---
+
+## Быстрый старт
 
 ### Способ установки
-- 📦 **Готовый APK (Рекомендуется):** Скачайте и установите файл [`VirtualCam-v2.2.0.apk`](VirtualCam-v2.2.0.apk) на смартфон (также доступен в [Releases](https://github.com/dimalinau-lab/Virtual-Camera-Android/releases)).
-- 🛠️ **Сборка из исходников:** Инструкция в разделе [Сборка APK из исходников](#️-сборка-apk-из-исходников).
+- **Готовый APK (Рекомендуется):** Скачайте и установите файл [`VirtualCam-v3.0.0.apk`](https://github.com/dimalinau-lab/Virtual-Camera/releases) на смартфон.
+- **Сборка из исходников:** Инструкция в разделе [Сборка APK из исходников](#сборка-apk-из-исходников).
 
 ### Режим USB (Минимальная задержка)
-1. Включите **Отладку по USB** (*Настройки -> Для разработчиков -> Отладка по USB*).
-2. Подключите телефон к компьютеру кабелем USB.
-3. Откройте приложение на телефоне и запустите `VirtualCamNative.exe` на ПК.
-4. Нажмите **USB Connect** на компьютере — порты пробросятся автоматически через ADB.
+1. Включите **Отладку по USB** на смартфоне (*Настройки -> Для разработчиков -> Отладка по USB*).
+2. Подключите смартфон к ПК кабелем USB.
+3. Запустите **VirtualCamNative** на смартфоне и откройте клиент на ПК.
+4. Нажмите **USB Connect** на ПК — порты `8080`, `8554` и `8555` пробрасываются автоматически через ADB.
 
 ### Режим Wi-Fi (Без проводов)
-1. Подключите ПК и смартфон к одной Wi-Fi сети (рекомендуется 5 ГГц).
-2. Запустите приложение на телефоне.
-3. В клиенте на ПК телефон появится в списке устройств автоматически.
-4. Нажмите **Wi-Fi Connect** и подтвердите запрос сопряжения на телефоне.
+1. Подключите ПК и смартфон к одной сети Wi-Fi (рекомендуется 5 ГГц).
+2. Запустите приложение на смартфоне.
+3. Клиент на ПК автоматически обнаружит смартфон через UDP Beacon (`:8888`).
+4. Выберите смартфон в списке и нажмите **Wi-Fi Connect**.
+5. Нажмите **Разрешить** в окне подтверждения на смартфоне.
 
 ---
 
-## 🛠️ Сборка APK из исходников
-
-- **Среда разработки:** Android Studio Jellyfish / Ladybug (2024.1+), JDK 17.
-- **Минимальная версия Android:** 8.0 (API 26) | **Целевая версия:** Android 15 (API 35).
+## Сборка APK из исходников
 
 ```bash
-# Клонирование и сборка
-git clone https://github.com/dimalinau-lab/Virtual-Camera-Android.git
-cd Virtual-Camera-Android
+git clone https://github.com/dimalinau-lab/Virtual-Camera.git
+cd Virtual-Camera/android
 ./gradlew assembleDebug
 ```
-Скомпилированный файл APK находится по пути: `app/build/outputs/apk/debug/app-debug.apk`.
+Готовый файл APK будет находиться в папке `app/build/outputs/apk/debug/app-debug.apk`.
 
 ---
 
-## 📄 Лицензия
+## Лицензия
 
-Проект распространяется под свободной лицензией **MIT**. Подробности в файле [`LICENSE`](LICENSE).
-
----
----
-
-# 🇺🇦 VirtualCamNative (Android) — Посібник українською
-
-> **Мобільний додаток для Android: апаратний HEVC-стрімер відео та звуку з наднизькою затримкою для ПК.**
-
-**VirtualCamNative для Android** — це безкоштовний додаток з відкритим вихідним кодом, що перетворює ваш смартфон на професійну веб-камеру та мікрофон для комп'ютера. На відміну від застарілих комерційних рішень, додаток використовує апаратний енкодер **HEVC (H.265)** через Android `MediaCodec`, прямий доступ до модулів камер через **Camera2 API** та транслює відеоряд і звук 48 кГц PCM із затримкою менше 30 мс.
+Проект распространяется под лицензией **MIT License**. Подробности в файле [`LICENSE`](LICENSE).
 
 ---
+---
 
-## 🚀 Що нового у версії v2.4.1
+# VirtualCamNative (Android) - Посібник українською
 
-- 📱 **Зручний перемикач режиму поверх вікон та LED-індикатор**: Інформативна скляна плашка зі світлодіодом статусу (смарагдовий — увімкнено, сірий — вимкнено) для контролю поведінки при згортанні.
-- 🍃 **Безпечна пауза у фоні та збереження заряду**: Якщо оверлей вимкнено, згортання додатку звільняє модуль камери та зупиняє енкодер H.265. Зелений індикатор приватності One UI вимикається, заряд батареї зберігається.
-- ⚡ **Миттєве відновлення роботи**: Повернення до додатку відновлює трансляцію за < 20 мс без перезавантажень або чорних екранів.
-- 🛡️ **Виправлення життєвого циклу на Samsung One UI**: Усунено циклічне аварійне закриття при запуску, спричинене синтетичними подіями `onUserLeaveHint` / `onStop` оболонки Samsung.
+> Мобільний додаток для Android: апаратний HEVC-стрімер відео та звуку з наднизькою затримкою для ПК.
 
-## 🚀 Що нового у версії v2.4.0
+<p align="center">
+  <img src="docs/images/phone_screen.png" alt="Видошукач VirtualCam для Android" width="340">
+  <br>
+  <em>Видошукач VirtualCam для Android (чистий інтерфейс без системного рядка статусу, апаратний вибір модулів, термометрія та режим захисту OLED)</em>
+</p>
 
-- 🤳 **Розблоковані 60 FPS для фронтальної селфі-камери**: Знято обмеження у 30 кадрів/с — доступний повноцінний режим 60 FPS та фіксація діапазону AE `[60, 60]`.
-- 💾 **Збереження роздільної здатності 1080p та вибору об'єктива**: Налаштування надійно зберігаються в `SharedPreferences` між запусками.
-- ⚡ **Підвищена стабільність конвеєра MediaCodec та Camera2**: Захист сесії захоплення від переривань під час перемикання сенсорів.
+<p align="center">
+  <img src="docs/images/pc_interface.png" alt="Інтерфейс VirtualCamNative для ПК" width="820">
+  <br>
+  <em>Панель керування VirtualCamNative для ПК (DirectShow/Media Foundation приймач із 60 FPS прискоренням на GPU)</em>
+</p>
+
+**VirtualCamNative для Android** — це безкоштовний додаток з відкритим вихідним кодом, що перетворює ваш смартфон на висококласну веб-камеру для ПК. На відміну від DroidCam та Iriun, додаток використовує апаратний енкодер **HEVC (H.265)** через Android `MediaCodec`, прямий доступ до сенсорів через **Camera2 API** та передає відео і 48 кГц PCM-звук на ПК із затримкою ~10–15 мс по USB та менше 30 мс по Wi-Fi.
 
 ---
 
-## 🌟 Головні можливості
+## Технічні характеристики
 
-- ⚡ **Наднизька затримка (< 30 мс через USB та Wi-Fi 5 ГГц)**  
-  Оптимізований мережевий транспорт TCP (`TCP_NODELAY`, 64 КБ буфер), апаратний тюнінг низької затримки (`KEY_LOW_LATENCY`, відсутність B-кадрів).
-- 🔍 **Апаратне перемикання фізичних об'єктивів (0.5x / 1x / 2x)**  
-  Пряме керування сенсорами смартфона: надширококутний, основний або телеоб'єктив через Camera2 `CONTROL_ZOOM_RATIO`.
-- 🎚️ **Професійні ручні параметри Pro Manual (v2.2.0)**  
-  Віддалене керування витримкою, ISO, фокусною відстанню та балансом білого прямо з клієнта на ПК без торкання екрана телефона.
-- 🛡️ **Безпечне сполучення та токени авторизації**  
-  При спробі підключення нового комп'ютера на екрані телефона з'являється системний запит на доступ. Створений токен безпечно зберігається на пристрої.
-- 📱 **Захист екрана OLED Blackout**  
-  Режим глибокого затемнення екрана зі зниженням підсвічування до `0.01f`, що запобігає вигорянню AMOLED-дисплеїв та зберігає заряд акумулятора.
-- 🔄 **Миттєва зміна роздільної здатності та орієнтації**  
-  Зміна портретної або альбомної орієнтації, роздільної здатності (720p, 1080p, 4K) та частоти кадрів (30/60 FPS) без розриву з'єднання.
-- 🎙️ **Якісний звук PCM 48 кГц**  
-  Окремий звуковий потік TCP `:8555` з використанням системного апаратного шумопоглинання.
-- 📡 **Автоматичне виявлення у мережі (UDP Beacon :8888)**  
-  Додаток самостійно заявляє про себе у локальній мережі — ПК миттєво знаходить телефон без потреби вводити IP-адресу вручну.
-- 📱 **Оптимізація під флагмани Samsung та Safe Area Insets (v2.2.0)**  
-  Динамічний розрахунок безпечних зон (`WindowInsetsCompat`) для екранів з вирізами камер (punch-hole) та скругленими кутами дисплеїв **Samsung Galaxy S22, S23, S24, Ultra** та інших безрамкових пристроїв.
-- 🪟 **Плавучий оверлей-віджет та інтерактивний PiP (v2.2.0)**  
-  Можливість роботи поверх інших вікон із живим прев'ю, швидким вимкненням звуку та перемиканням камер.
-- 🌡️ **Термомоніторинг акумулятора (v2.2.0)**  
-  Відображення поточної температури батареї (`🌡️ 32°C`) та захист від перегріву смартфона під час тривалих стрімів.
+| Параметр | Значення | Опис |
+| :--- | :--- | :--- |
+| **Роздільна здатність** | 1080p FHD (1920x1080), 4K UHD (3840x2160), 720p HD (1280x720) | Миттєва зміна параметрів без розриву з'єднання |
+| **Частота кадрів** | 60 FPS, 30 FPS | Нативний діапазон `[60, 60]` та чесні 60 FPS на селфі-модулі |
+| **Затримка (Glass-to-Glass)** | ~10–15 мс (USB 3.0), < 30 мс (Wi-Fi 5 ГГц) | Прямий конвеєр Camera2 Surface в апаратний енкодер MediaCodec |
+| **Відеоенкодер** | Android MediaCodec HEVC (H.265) | Апаратний CBR-енкодер із реальним часом та нульовими B-кадрами |
+| **Аудіозахоплення** | 48 кГц, 16 біт PCM | Системний потік AudioRecord з апаратним шумопоглинанням |
+| **Мережеві порти** | `8080` (Phone API), `8554` (Video TCP), `8555` (Audio TCP), `8888` (UDP Discovery), `8000` (PC UI) | Автоматичне перенаправлення через ADB по USB |
+| **Вимоги до Android** | Android 8.0+ (API 26-35) | Цільовий SDK 35 (Android 15) |
+| **Файл релізу** | `VirtualCam-v3.0.0.apk` | Повна сумісність із `VirtualCamNative_Setup_v3.0.0.exe` |
 
 ---
 
-## 🚀 Швидкий старт
+## Головні можливості
+
+- **Наднизька затримка (~10–15 мс по USB, < 30 мс по Wi-Fi 5 ГГц)**: Оптимізований сокет TCP (`TCP_NODELAY`, буфер 64 КБ), низьколатентний режим енкодера без буферизації.
+- **Перемикання фізичних об'єктивів камери (0.5x / 1x / 2x / 3x / 5x / Макро / Селфі)**: Прямий доступ до надширококутного, основного, телефото та макро модулів через апаратний `CONTROL_ZOOM_RATIO`.
+- **Ручні налаштування зйомки Pro Manual**: Дистанційне керування витримкою, ISO (100–3200), оптичною дистанцією фокусування та балансом білого прямо з ПК.
+- **Безпечне спарення та токен авторизації**: Системне діалогове вікно підтвердження на екрані смартфона при першому підключенні нового ПК.
+- **OLED Blackout — захист екрана від вигорання**: Режим повного затемнення дисплея з мінімальною яскравістю (`0.01f`), що запобігає нагріванню та вигоранню матриць.
+- **Миттєва зміна орієнтації та роздільної здатності**: Перемикання між вертикальним/горизонтальним режимом, 720p, 1080p та 4K при 30 або 60 FPS прямо під час стріму.
+- **Чистий звук 48 кГц PCM**: Окремий TCP-потік звуку на порт `8555` з апаратним шумопоглинанням.
+- **Автоматичне виявлення в мережі (UDP Beacon :8888)**: Широкомовний маяк раз на 1.5 секунди для миттєвого знаходження пристрою.
+- **Адаптація до вирізів екранів**: Розрахунок безпечних зон під вирізи камер (punch-hole) та системні смуги.
+- **Плаваюче вікно та режим PiP**: Згортання у плаваючий віджет поверх інших додатків із кнопками швидкого керування.
+- **Термомоніторинг акумулятора**: Живе відображення температури акумулятора (`32°C`) із попередженням про нагрівання.
+
+---
+
+## Швидкий старт
 
 ### Спосіб встановлення
-- 📦 **Готовий APK (Рекомендовано):** Завантажте та встановіть файл [`VirtualCam-v2.2.0.apk`](VirtualCam-v2.2.0.apk) на смартфон (також доступний у [Releases](https://github.com/dimalinau-lab/Virtual-Camera-Android/releases)).
-- 🛠️ **Збирання з вихідного коду:** Інструкція у розділі [Збирання APK з вихідного коду](#️-збирання-apk-з-вихідного-коду).
+- **Готовий APK (Рекомендовано):** Завантажте та встановіть [`VirtualCam-v3.0.0.apk`](https://github.com/dimalinau-lab/Virtual-Camera/releases) на смартфон.
+- **Збирання з вихідного коду:** Див. розділ [Збирання APK з вихідного коду](#збирання-apk-з-вихідного-коду).
 
 ### Підключення через USB (Рекомендовано)
-1. Увімкніть **Налагодження через USB** (*Налаштування -> Для розробників -> Налагодження через USB*).
-2. Підключіть телефон до ПК кабелем USB.
-3. Запустіть додаток на телефоні та `VirtualCamNative.exe` на комп'ютері.
-4. Натисніть **USB Connect** на ПК — порти прокидаються автоматично через ADB.
+1. Увімкніть **Налагодження через USB** на смартфоні (*Налаштування -> Параметри розробника -> Налагодження через USB*).
+2. Підключіть телефон до ПК через USB-кабель.
+3. Запустіть **VirtualCamNative** на смартфоні та відкрийте клієнт на ПК.
+4. Натисніть **USB Connect** на ПК — порти `8080`, `8554` та `8555` перенаправляються автоматично.
 
 ### Бездротове підключення через Wi-Fi
-1. Підключіть ПК та смартфон до однієї Wi-Fi мережі (бажано 5 ГГц).
+1. Підключіть ПК та смартфон до однієї мережі Wi-Fi (5 ГГц рекомендовано).
 2. Відкрийте додаток на смартфоні.
-3. У програмі на ПК пристрій з'явиться автоматично у верхньому списку.
-4. Натисніть **Wi-Fi Connect** та дозвольте сполучення на екрані смартфона.
+3. Клієнт на ПК автоматично знайде смартфон через UDP Beacon (`:8888`).
+4. Оберіть смартфон зі списку та натисніть **Wi-Fi Connect**.
+5. Натисніть **Дозволити** у вікні підтвердження на смартфоні.
 
 ---
 
-## 🛠️ Збирання APK з вихідного коду
-
-- **Інструменти:** Android Studio (2024.1+), JDK 17, Gradle 8.x.
-- **Підтримувані версії:** Android 8.0 (API 26) — Android 15 (API 35).
+## Збирання APK з вихідного коду
 
 ```bash
-# Клонування та компіляція
-git clone https://github.com/dimalinau-lab/Virtual-Camera-Android.git
-cd Virtual-Camera-Android
+git clone https://github.com/dimalinau-lab/Virtual-Camera.git
+cd Virtual-Camera/android
 ./gradlew assembleDebug
 ```
-Готовий APK буде розміщено за адресою: `app/build/outputs/apk/debug/app-debug.apk`.
 
 ---
 
-## 📄 Ліцензія
+## Ліцензія
 
-Проект поширюється за вільною ліцензією **MIT**. Перегляньте [`LICENSE`](LICENSE) для отримання детальної інформації.
+Проєкт розповсюджується під ліцензією **MIT License**. Докладніше у файлі [`LICENSE`](LICENSE).

@@ -114,9 +114,12 @@ class AutoFramingController {
             val minCropSpan = 1.0f / MAX_ZOOM
             val cropSpan = (rawSpan * 1.85f).coerceIn(minCropSpan, 1.0f)
 
-            // Вычисляем целевой охват кадра с центрированием
+            // Вертикальное кадрирование (Sensor X) отслеживает высоту головы
             val newXMin = (centerX - cropSpan / 2.0f).coerceIn(0.0f, 1.0f - cropSpan)
-            val newYMin = (centerY - cropSpan / 2.0f).coerceIn(0.0f, 1.0f - cropSpan)
+
+            // Горизонтальное кадрирование (Sensor Y) отслеживает перемещение головы влево/вправо
+            val targetCenterY = if (!isFront) centerY else (1.0f - centerY)
+            val newYMin = (targetCenterY - cropSpan / 2.0f).coerceIn(0.0f, 1.0f - cropSpan)
 
             targetXMin = newXMin
             targetXMax = newXMin + cropSpan

@@ -71,15 +71,11 @@ class MainActivity : AppCompatActivity() {
     private var isNavigatingToSettings = false
 
     private var isZenUiHidden = false
-    private val zenHideHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val zenHideRunnable = Runnable {
-        hideZenUi()
-    }
 
     private var sensorManager: SensorManager? = null
     private var accelerometer: Sensor? = null
     private var gyroscope: Sensor? = null
-    private var isAutoDimmingEnabled = true
+    private var isAutoDimmingEnabled = false
     private var lastAccelX = 0f
     private var lastAccelY = 0f
     private var lastAccelZ = 0f
@@ -168,10 +164,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun scheduleAutoBlackout() {
         autoBlackoutHandler.removeCallbacks(autoBlackoutRunnable)
-        if (!isAutoDimmingEnabled) return
-        if (cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
-            autoBlackoutHandler.postDelayed(autoBlackoutRunnable, 30_000L)
-        }
     }
 
     private fun cancelAutoBlackout() {
@@ -222,14 +214,6 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    private fun toggleZenUi() {
-        if (isZenUiHidden) {
-            showZenUi()
-        } else {
-            hideZenUi()
-        }
-    }
-
     private lateinit var scaleGestureDetector: ScaleGestureDetector
 
     private fun showZenUi() {
@@ -244,11 +228,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             binding.btnShowBottomPanel.visibility = View.VISIBLE
         }
-        binding.btnFloatingTogglePill.animate().alpha(1f).setDuration(220).withStartAction {
-            binding.btnFloatingTogglePill.visibility = View.VISIBLE
-        }.start()
-
-        zenHideHandler.removeCallbacks(zenHideRunnable)
     }
 
     private fun hideZenUi() {
@@ -260,9 +239,6 @@ class MainActivity : AppCompatActivity() {
             binding.bottomPanelContainer.visibility = View.INVISIBLE
         }.start()
         binding.btnShowBottomPanel.visibility = View.GONE
-        binding.btnFloatingTogglePill.animate().alpha(0f).setDuration(220).withEndAction {
-            binding.btnFloatingTogglePill.visibility = View.INVISIBLE
-        }.start()
     }
 
     fun updateLensBar() {
@@ -270,7 +246,8 @@ class MainActivity : AppCompatActivity() {
         val status = service.getStatus()
         val lenses = status.availableLenses
         val currentLens = status.currentLens
-        val currentZoom = status.currentZoom
+        val currentUnit = status.currentCameraUnit
+        val currentFacing = service.currentCameraFacing
 
         binding.lensBarLayout.post {
             binding.lensBarLayout.removeAllViews()
@@ -282,8 +259,20 @@ class MainActivity : AppCompatActivity() {
 
             for (lens in lenses) {
                 val tv = TextView(this).apply {
-                    val isSelected = (lens == currentLens) || (lens.replace("x", "").toFloatOrNull()?.let { Math.abs(it - currentZoom) < 0.15f } == true)
-                    text = lens
+                    val isSelected = when {
+                        lens.equals("front", ignoreCase = true) || lens.equals("селфи", ignoreCase = true) ->
+                            currentFacing == "front"
+                        currentFacing == "front" -> false
+                        lens == "0.5x" -> (currentLens == "0.5x" || currentUnit == "0.5x" || currentUnit == "50" || currentUnit == "58")
+                        lens == "macro" -> (currentLens == "macro" || currentUnit == "macro" || currentUnit == "54")
+                        lens == "1x" -> (currentLens == "1x" || currentUnit == "0" || currentUnit == "1.0x" || (currentLens.isEmpty() && currentUnit != "0.5x" && currentUnit != "macro"))
+                        else -> lens.equals(currentLens, ignoreCase = true)
+                    }
+                    text = when (lens.lowercase()) {
+                        "macro" -> "Макро"
+                        "front", "селфи", "фронт" -> "Фронт"
+                        else -> lens
+                    }
                     textSize = 12f
                     gravity = android.view.Gravity.CENTER
                     setPadding(26, 10, 26, 10)
@@ -317,6 +306,16 @@ class MainActivity : AppCompatActivity() {
         override fun onStreamingStatusChanged(isStreaming: Boolean) {
             runOnUiThread {
                 updateStreamingStatusUI(isStreaming)
+            }
+        }
+
+        override fun onStatusUpdated() {
+            runOnUiThread {
+                updateLensBar()
+                cameraService?.let { service ->
+                    updateFlipCameraUI(service.currentCameraFacing == "front")
+                    updateTorchUI(service.isTorchOn)
+                }
             }
         }
     }
@@ -427,6 +426,7 @@ class MainActivity : AppCompatActivity() {
             updateAutoFramingUI(cameraService?.isAutoFramingEnabled ?: false)
             updateStabilizationUI(cameraService?.isStabilization ?: false, cameraService?.hasOis ?: false, cameraService?.hasEis ?: false)
             updateFlipCameraUI(cameraService?.currentCameraFacing == "front")
+            updateTorchUI(cameraService?.isTorchOn ?: false)
             updateLensBar()
             updatePipParams()
             Log.i(TAG, "Успешно привязаны к FloatingCameraService")
@@ -523,27 +523,17 @@ class MainActivity : AppCompatActivity() {
                 val bottomMargin = maxOf(navBars.bottom + (16 * density).toInt(), baseMargin)
                 bottomLp.bottomMargin = bottomMargin
                 binding.bottomActionBar.layoutParams = bottomLp
-
-                val pillLp = binding.btnFloatingTogglePill.layoutParams as? ViewGroup.MarginLayoutParams
-                if (pillLp != null) {
-                    pillLp.bottomMargin = bottomMargin + (56 * density).toInt()
-                    binding.btnFloatingTogglePill.layoutParams = pillLp
-                }
             }
 
             windowInsets
         }
 
-        // 1.5. Быстрый жест: двойной тап для переворота камеры и одинарный тап для Zen Mode
+        // 1.5. Быстрый жест: одинарный тап для возврата Zen UI (двойной тап отключен по запросу пользователя)
         val previewGestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                cameraService?.switchCamera()
-                Toast.makeText(this@MainActivity, "📷 Камера переключена", Toast.LENGTH_SHORT).show()
-                return true
-            }
-
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                toggleZenUi()
+                if (isZenUiHidden) {
+                    showZenUi()
+                }
                 return true
             }
         })
@@ -594,8 +584,20 @@ class MainActivity : AppCompatActivity() {
             binding.viewFinder.postDelayed({
                 updateLensBar()
                 updateFlipCameraUI(service.currentCameraFacing == "front")
+                updateTorchUI(service.isTorchOn)
             }, 650)
             Toast.makeText(this, if (isFront) "Камера: Фронтальная" else "Камера: Основная", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.btnTorch.setOnClickListener {
+            val service = cameraService ?: return@setOnClickListener
+            if (service.currentCameraFacing == "front") {
+                Toast.makeText(this, "Фонарик доступен только для задней камеры", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            service.toggleTorch()
+            updateTorchUI(service.isTorchOn)
+            Toast.makeText(this, if (service.isTorchOn) "Фонарик: ВКЛ" else "Фонарик: ВЫКЛ", Toast.LENGTH_SHORT).show()
         }
 
         binding.btnAutoFraming.setOnClickListener {
@@ -634,24 +636,6 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 Toast.makeText(this, "Включите режим поверх приложений нажатием на кнопку", Toast.LENGTH_SHORT).show()
-            }
-            true
-        }
-
-        binding.btnFloatingTogglePill.setOnClickListener {
-            toggleFloatingMode()
-        }
-
-        binding.btnFloatingTogglePill.setOnLongClickListener {
-            if (isFloatingEnabled) {
-                if (Settings.canDrawOverlays(this)) {
-                    cameraService?.showFloatingOverlay()
-                    moveTaskToBack(true)
-                } else {
-                    requestOverlayPermission()
-                }
-            } else {
-                Toast.makeText(this, "Включите режим поверх приложений нажатием на плашку", Toast.LENGTH_SHORT).show()
             }
             true
         }
@@ -735,14 +719,7 @@ class MainActivity : AppCompatActivity() {
         val drawableRes = if (enabled) R.drawable.ic_floating_window else R.drawable.ic_floating_window_off
         val iconDrawable = getSafeDrawable(drawableRes)
 
-        // 1. Информативная плашка с текстом и индикатором статуса
-        binding.ivFloatingPillIcon.setImageDrawable(iconDrawable)
-        binding.ivFloatingPillIcon.imageTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#71717A"))
-        binding.tvFloatingPillText.text = if (enabled) "Поверх приложений: ВКЛ" else "Поверх приложений: ВЫКЛ"
-        binding.tvFloatingPillText.setTextColor(if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#A1A1AA"))
-        binding.dotFloatingPill.backgroundTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#10B981") else Color.parseColor("#71717A"))
-
-        // 2. Круглая кнопка в панели действий
+        // Круглая кнопка в панели действий
         binding.btnFloatingMode.setImageDrawable(iconDrawable)
         binding.btnFloatingMode.imageTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#38BDF8") else Color.parseColor("#71717A"))
         binding.btnFloatingMode.backgroundTintList = ColorStateList.valueOf(if (enabled) Color.parseColor("#3338BDF8") else Color.parseColor("#26FFFFFF"))
@@ -830,18 +807,25 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun updateTorchUI(isTorchOn: Boolean) {
+        binding.btnTorch.post {
+            binding.btnTorch.imageTintList = ColorStateList.valueOf(
+                if (isTorchOn) Color.parseColor("#FBBF24") else Color.parseColor("#A1A1AA")
+            )
+            binding.btnTorch.backgroundTintList = ColorStateList.valueOf(
+                if (isTorchOn) Color.parseColor("#33FBBF24") else Color.parseColor("#26FFFFFF")
+            )
+        }
+    }
+
     private fun updateStreamingStatusUI(isStreaming: Boolean) {
         if (isStreaming) {
             binding.statusText.text = "В ЭФИРЕ"
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
-            // Zen Mode: автоскрытие рамок управления через 3 секунды после начала стрима
-            zenHideHandler.removeCallbacks(zenHideRunnable)
-            zenHideHandler.postDelayed(zenHideRunnable, 3000)
-            scheduleAutoBlackout()
+            showZenUi()
         } else {
             binding.statusText.text = "ОЖИДАНИЕ ПК"
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FFC107"))
-            zenHideHandler.removeCallbacks(zenHideRunnable)
             cancelAutoBlackout()
             if (binding.blackoutOverlay.visibility == View.VISIBLE) {
                 disableBlackout()
@@ -926,12 +910,10 @@ class MainActivity : AppCompatActivity() {
             binding.blackoutOverlay.visibility = View.GONE
             binding.topBarLayout.visibility = View.GONE
             binding.bottomActionBar.visibility = View.GONE
-            binding.btnFloatingTogglePill.visibility = View.GONE
             supportActionBar?.hide()
         } else {
             binding.topBarLayout.visibility = View.VISIBLE
             binding.bottomActionBar.visibility = View.VISIBLE
-            binding.btnFloatingTogglePill.visibility = View.VISIBLE
             supportActionBar?.show()
             updatePipParams()
         }
@@ -1070,7 +1052,11 @@ class MainActivity : AppCompatActivity() {
             if (binding.blackoutOverlay.visibility == View.VISIBLE) {
                 disableBlackout()
                 return true
-            } else if (cameraService?.isStreamingActive() == true) {
+            }
+            if (isZenUiHidden) {
+                showZenUi()
+            }
+            if (cameraService?.isStreamingActive() == true) {
                 scheduleAutoBlackout()
             }
         }
@@ -1126,7 +1112,6 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         stopMotionSensor()
         cancelAutoBlackout()
-        zenHideHandler.removeCallbacks(zenHideRunnable)
         try {
             unregisterReceiver(pipReceiver)
         } catch (_: Exception) {}
