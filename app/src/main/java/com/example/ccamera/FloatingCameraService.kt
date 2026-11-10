@@ -116,6 +116,10 @@ class FloatingCameraService : Service(),
     private var isFloatingOverlayEnabled = true
     private var udpBeaconBroadcaster: UdpBeaconBroadcaster? = null
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.applyLocale(newBase))
+    }
+
     private var currentCameraFacingName: String = "back"
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -315,7 +319,7 @@ class FloatingCameraService : Service(),
 
                 override fun onToggleMute(): Boolean {
                     val isMuted = toggleMicMute()
-                    updateNotification(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+                    updateNotification(getNotificationStatusText())
                     return isMuted
                 }
 
@@ -359,7 +363,7 @@ class FloatingCameraService : Service(),
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
 
         initControllersIfNeeded()
-        startForegroundWithStatus("Ожидание подключения ПК...")
+        startForegroundWithStatus(getNotificationStatusText())
         registerReceiver(heatGuardReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         startOrientationDetection()
 
@@ -382,13 +386,13 @@ class FloatingCameraService : Service(),
                 Log.i(TAG, "Получен запрос переключения микрофона из Notification/PiP")
                 val isMuted = toggleMicMute()
                 overlayController?.setMicMuted(isMuted)
-                updateNotification(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+                updateNotification(getNotificationStatusText())
                 return START_STICKY
             }
         }
 
         try {
-            startForegroundWithStatus(if (isStreaming) "Трансляция активна ($targetWidth x $targetHeight)" else "Ожидание подключения ПК...")
+            startForegroundWithStatus(getNotificationStatusText())
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка startForegroundWithStatus в onStartCommand", e)
         }
@@ -511,6 +515,14 @@ class FloatingCameraService : Service(),
         manager.createNotificationChannel(channel)
     }
 
+    private fun getNotificationStatusText(): String {
+        return if (isStreaming) {
+            getString(R.string.notif_streaming, targetWidth, targetHeight)
+        } else {
+            getString(R.string.notif_waiting)
+        }
+    }
+
     private fun buildNotificationBuilder(statusText: String): NotificationCompat.Builder {
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -552,7 +564,7 @@ class FloatingCameraService : Service(),
         )
 
         val isMuted = audioStreamer?.isMuted ?: false
-        val micTitle = if (isMuted) "Вкл. микр." else "Выкл. микр."
+        val micTitle = getString(R.string.action_mic)
         val micIcon = if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -560,9 +572,9 @@ class FloatingCameraService : Service(),
             .setContentText(statusText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
-            .addAction(R.drawable.ic_switch_camera, "Камера", flipPendingIntent)
+            .addAction(R.drawable.ic_switch_camera, getString(R.string.action_camera), flipPendingIntent)
             .addAction(micIcon, micTitle, micPendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Остановить", stopPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_close), stopPendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -594,20 +606,36 @@ class FloatingCameraService : Service(),
     // --- Управление Blackout (затемнение экрана) ---
 
     fun toggleBlackout(): Boolean {
-        if (isBlackoutEnabled) {
-            disableBlackout()
-        } else {
-            enableBlackout()
-        }
+        setBlackoutEnabled(!isBlackoutEnabled)
         return isBlackoutEnabled
     }
 
-    private fun enableBlackout() {
-        if (isBlackoutEnabled) return
+    fun setBlackoutEnabled(enabled: Boolean) {
+        if (isBlackoutEnabled == enabled) return
+        isBlackoutEnabled = enabled
+        Log.i(TAG, "setBlackoutEnabled: enabled=$enabled, listeners=${statusListeners.size}")
+        notifyBlackoutToggled(enabled)
+
+        if (statusListeners.isNotEmpty()) {
+            // Foreground activity handles blackout in foreground window with direct screenBrightness = 0.0f
+            removeServiceOverlayBlackout()
+            return
+        }
+
+        // Fallback for background / floating overlay mode
+        if (enabled) {
+            showServiceOverlayBlackout()
+        } else {
+            removeServiceOverlayBlackout()
+        }
+    }
+
+    private fun showServiceOverlayBlackout() {
         if (!Settings.canDrawOverlays(this)) {
             Log.w(TAG, "Нет разрешения SYSTEM_ALERT_WINDOW для отображения блэкаута")
             return
         }
+        if (blackoutOverlayView != null) return
 
         try {
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -619,11 +647,11 @@ class FloatingCameraService : Service(),
 
             val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                    disableBlackout()
+                    setBlackoutEnabled(false)
                     return true
                 }
                 override fun onDoubleTap(e: MotionEvent): Boolean {
-                    disableBlackout()
+                    setBlackoutEnabled(false)
                     return true
                 }
             })
@@ -644,22 +672,20 @@ class FloatingCameraService : Service(),
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                         WindowManager.LayoutParams.FLAG_FULLSCREEN or
                         WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
-                PixelFormat.TRANSLUCENT
+                PixelFormat.OPAQUE
             ).apply {
-                screenBrightness = 0.01f
+                screenBrightness = 0.0f
             }
 
             windowManager.addView(view, params)
             blackoutOverlayView = view
-            isBlackoutEnabled = true
-            Log.i(TAG, "Blackout (затемнение экрана) включен")
+            Log.i(TAG, "Blackout overlay включен (background/floating)")
         } catch (e: Exception) {
-            Log.e(TAG, "Ошибка включения Blackout", e)
+            Log.e(TAG, "Ошибка включения Blackout overlay", e)
         }
     }
 
-    private fun disableBlackout() {
-        if (!isBlackoutEnabled) return
+    private fun removeServiceOverlayBlackout() {
         try {
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             blackoutOverlayView?.let { view ->
@@ -668,11 +694,14 @@ class FloatingCameraService : Service(),
                 }
             }
             blackoutOverlayView = null
-            isBlackoutEnabled = false
-            Log.i(TAG, "Blackout (затемнение экрана) выключен")
+            Log.i(TAG, "Blackout overlay выключен")
         } catch (e: Exception) {
-            Log.e(TAG, "Ошибка выключения Blackout", e)
+            Log.e(TAG, "Ошибка выключения Blackout overlay", e)
         }
+    }
+
+    private fun disableBlackout() {
+        setBlackoutEnabled(false)
     }
 
     // --- Управление сервером, кодеком и камерой ---
@@ -2193,11 +2222,11 @@ class FloatingCameraService : Service(),
             try {
                 if (Settings.canDrawOverlays(this)) {
                     AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Запрос подключения")
-                        .setMessage("Компьютер \"$clientName\" запрашивает доступ к камере. Разрешить подключение?")
+                        .setTitle(R.string.pairing_title)
+                        .setMessage(getString(R.string.pairing_message, clientName))
                         .setCancelable(false)
-                        .setPositiveButton("Разрешить") { _, _ -> onDecision(true) }
-                        .setNegativeButton("Отклонить") { _, _ -> onDecision(false) }
+                        .setPositiveButton(R.string.pairing_allow) { _, _ -> onDecision(true) }
+                        .setNegativeButton(R.string.pairing_decline) { _, _ -> onDecision(false) }
                         .create().apply {
                             window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
                             show()
@@ -2375,6 +2404,7 @@ class FloatingCameraService : Service(),
     interface ServiceStatusListener {
         fun onStreamingStatusChanged(isStreaming: Boolean)
         fun onStatusUpdated() {}
+        fun onBlackoutToggled(isBlackout: Boolean) {}
     }
 
     private val statusListeners = java.util.concurrent.CopyOnWriteArrayList<ServiceStatusListener>()
@@ -2383,10 +2413,25 @@ class FloatingCameraService : Service(),
         statusListeners.add(listener)
         listener.onStreamingStatusChanged(isStreaming)
         listener.onStatusUpdated()
+        listener.onBlackoutToggled(isBlackoutEnabled)
+        if (isBlackoutEnabled) {
+            removeServiceOverlayBlackout()
+        }
     }
 
     fun removeStatusListener(listener: ServiceStatusListener) {
         statusListeners.remove(listener)
+        if (isBlackoutEnabled && statusListeners.isEmpty()) {
+            showServiceOverlayBlackout()
+        }
+    }
+
+    private fun notifyBlackoutToggled(isBlackout: Boolean) {
+        mainHandler.post {
+            for (l in statusListeners) {
+                try { l.onBlackoutToggled(isBlackout) } catch (_: Exception) {}
+            }
+        }
     }
 
     private fun notifyStatusChanged(streaming: Boolean) {

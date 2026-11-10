@@ -1,6 +1,7 @@
 package com.example.ccamera
 
 import android.Manifest
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -72,6 +73,10 @@ class MainActivity : AppCompatActivity() {
 
     private var isZenUiHidden = false
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.applyLocale(newBase))
+    }
+
     private var sensorManager: SensorManager? = null
     private var accelerometer: Sensor? = null
     private var gyroscope: Sensor? = null
@@ -125,7 +130,7 @@ class MainActivity : AppCompatActivity() {
 
         if (binding.blackoutOverlay.visibility == View.VISIBLE) {
             disableBlackout()
-            Toast.makeText(this, "📱 Движение обнаружено: экран включен", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.motion_detected), Toast.LENGTH_SHORT).show()
         } else if (isAutoDimmingEnabled && cameraService?.isStreamingActive() == true) {
             scheduleAutoBlackout()
         }
@@ -158,7 +163,7 @@ class MainActivity : AppCompatActivity() {
     private val autoBlackoutRunnable = Runnable {
         if (isAutoDimmingEnabled && cameraService?.isStreamingActive() == true && binding.blackoutOverlay.visibility != View.VISIBLE) {
             enableBlackout()
-            Toast.makeText(this, "Энергосбережение: экран затемнен (подвигайте телефон для пробуждения)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.eco_blackout_tip), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -269,8 +274,8 @@ class MainActivity : AppCompatActivity() {
                         else -> lens.equals(currentLens, ignoreCase = true)
                     }
                     text = when (lens.lowercase()) {
-                        "macro" -> "Макро"
-                        "front", "селфи", "фронт" -> "Фронт"
+                        "macro" -> getString(R.string.lens_macro)
+                        "front", "селфи", "фронт" -> getString(R.string.lens_front)
                         else -> lens
                     }
                     textSize = 12f
@@ -318,6 +323,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        override fun onBlackoutToggled(isBlackout: Boolean) {
+            runOnUiThread {
+                if (isBlackout) {
+                    enableBlackout()
+                } else {
+                    disableBlackout()
+                }
+            }
+        }
     }
 
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -326,7 +341,8 @@ class MainActivity : AppCompatActivity() {
                 val tempRaw = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
                 val tempC = tempRaw / 10f
                 val isHot = tempC >= 42.0f
-                binding.batteryTempText.text = if (isHot) "🌡️ ${tempC.toInt()}°C 🔥 ПЕРЕГРЕВ" else "🌡️ ${tempC.toInt()}°C"
+                val overheatStr = getString(R.string.battery_overheat)
+                binding.batteryTempText.text = if (isHot) "🌡️ ${tempC.toInt()}°C $overheatStr" else "🌡️ ${tempC.toInt()}°C"
                 binding.batteryTempText.setTextColor(if (isHot) Color.parseColor("#EF4444") else Color.parseColor("#A1A1AA"))
             }
         }
@@ -367,7 +383,7 @@ class MainActivity : AppCompatActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val flipIcon = Icon.createWithResource(this, R.drawable.ic_switch_camera)
-        actions.add(RemoteAction(flipIcon, "Камера", "Сменить камеру", flipPending))
+        actions.add(RemoteAction(flipIcon, getString(R.string.action_camera), getString(R.string.action_camera), flipPending))
 
         val isMuted = cameraService?.isMicMuted() ?: false
         val micIntent = Intent(PIP_ACTION_TOGGLE_MIC).setPackage(packageName)
@@ -378,7 +394,7 @@ class MainActivity : AppCompatActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val micIcon = Icon.createWithResource(this, if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic)
-        val micTitle = if (isMuted) "Вкл. микр." else "Выкл. микр."
+        val micTitle = getString(R.string.action_mic)
         actions.add(RemoteAction(micIcon, micTitle, micTitle, micPending))
 
         val stopIntent = Intent(PIP_ACTION_STOP).setPackage(packageName)
@@ -389,7 +405,7 @@ class MainActivity : AppCompatActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val stopIcon = Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel)
-        actions.add(RemoteAction(stopIcon, "Стоп", "Остановить камеру", stopPending))
+        actions.add(RemoteAction(stopIcon, getString(R.string.action_close), getString(R.string.action_close), stopPending))
 
         return actions
     }
@@ -448,7 +464,7 @@ class MainActivity : AppCompatActivity() {
         if (cameraGranted && audioGranted) {
             startAndBindCameraService()
         } else {
-            Toast.makeText(this, "Требуются разрешения на использование камеры и микрофона", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.permissions_required), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -457,13 +473,13 @@ class MainActivity : AppCompatActivity() {
     ) {
         val hasOverlay = Settings.canDrawOverlays(this)
         if (hasOverlay) {
-            Toast.makeText(this, "Разрешение получено: режим поверх приложений включен", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.permission_granted_floating), Toast.LENGTH_SHORT).show()
             isFloatingEnabled = true
             cameraService?.setFloatingOverlayEnabled(true)
             saveFloatingPref(true)
             updateFloatingModeUI(true)
         } else {
-            Toast.makeText(this, "Разрешение не предоставлено: режим выключен", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.permission_denied_floating), Toast.LENGTH_SHORT).show()
             isFloatingEnabled = false
             cameraService?.setFloatingOverlayEnabled(false)
             saveFloatingPref(false)
@@ -560,6 +576,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 2. Выход из блэкаута по касанию любого места экрана
+        binding.blackoutOverlay.setOnClickListener {
+            disableBlackout()
+        }
         binding.blackoutOverlay.setOnTouchListener { v, event ->
             if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_DOWN) {
                 disableBlackout()
@@ -567,6 +586,11 @@ class MainActivity : AppCompatActivity() {
             }
             true
         }
+
+        binding.btnLanguageSelector.setOnClickListener {
+            showLanguageDialog()
+        }
+        updateLanguageSelectorUI()
 
         binding.btnHideBottomPanel.setOnClickListener {
             hideBottomPanel()
@@ -586,18 +610,18 @@ class MainActivity : AppCompatActivity() {
                 updateFlipCameraUI(service.currentCameraFacing == "front")
                 updateTorchUI(service.isTorchOn)
             }, 650)
-            Toast.makeText(this, if (isFront) "Камера: Фронтальная" else "Камера: Основная", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, if (isFront) getString(R.string.cam_front) else getString(R.string.cam_back), Toast.LENGTH_SHORT).show()
         }
 
         binding.btnTorch.setOnClickListener {
             val service = cameraService ?: return@setOnClickListener
             if (service.currentCameraFacing == "front") {
-                Toast.makeText(this, "Фонарик доступен только для задней камеры", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.torch_back_only), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             service.toggleTorch()
             updateTorchUI(service.isTorchOn)
-            Toast.makeText(this, if (service.isTorchOn) "Фонарик: ВКЛ" else "Фонарик: ВЫКЛ", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, if (service.isTorchOn) getString(R.string.torch_on) else getString(R.string.torch_off), Toast.LENGTH_SHORT).show()
         }
 
         binding.btnAutoFraming.setOnClickListener {
@@ -605,7 +629,7 @@ class MainActivity : AppCompatActivity() {
             val newState = !service.isAutoFramingEnabled
             service.setAutoFramingEnabled(newState)
             updateAutoFramingUI(newState)
-            Toast.makeText(this, if (newState) "Автокадрирование лица: ВКЛ" else "Автокадрирование лица: ВЫКЛ", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, if (newState) getString(R.string.autoframing_on) else getString(R.string.autoframing_off), Toast.LENGTH_SHORT).show()
         }
 
         binding.btnStabilization.setOnClickListener {
@@ -615,11 +639,11 @@ class MainActivity : AppCompatActivity() {
             updateStabilizationUI(newState, service.hasOis, service.hasEis)
             val tag = when {
                 service.hasOis && service.hasEis -> " (OIS + EIS)"
-                service.hasOis -> " (OIS оптическая)"
-                service.hasEis -> " (EIS электронная)"
+                service.hasOis -> " (OIS)"
+                service.hasEis -> " (EIS)"
                 else -> ""
             }
-            Toast.makeText(this, if (newState) "Стабилизация$tag: ВКЛ" else "Стабилизация: ВЫКЛ", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, if (newState) getString(R.string.stabilization_on, tag) else getString(R.string.stabilization_off), Toast.LENGTH_SHORT).show()
         }
 
         binding.btnFloatingMode.setOnClickListener {
@@ -641,26 +665,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnEcoBlackout.setOnClickListener {
+            cameraService?.toggleBlackout()
+        }
+
+        binding.btnEcoBlackout.setOnLongClickListener {
             isAutoDimmingEnabled = !isAutoDimmingEnabled
             updateEcoBlackoutUI()
             if (isAutoDimmingEnabled) {
                 scheduleAutoBlackout()
-                Toast.makeText(this, "⏱️ Эко-затухание по гироскопу (30 сек): ВКЛ", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.gyro_eco_on), Toast.LENGTH_SHORT).show()
             } else {
                 cancelAutoBlackout()
                 if (binding.blackoutOverlay.visibility == View.VISIBLE) {
                     disableBlackout()
                 }
-                Toast.makeText(this, "⏱️ Эко-затухание по гироскопу: ВЫКЛ", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        binding.btnEcoBlackout.setOnLongClickListener {
-            val isBlackout = cameraService?.toggleBlackout() ?: false
-            if (isBlackout) {
-                enableBlackout()
-            } else {
-                disableBlackout()
+                Toast.makeText(this, getString(R.string.gyro_eco_off), Toast.LENGTH_SHORT).show()
             }
             true
         }
@@ -731,7 +750,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleFloatingMode() {
         val newState = !isFloatingEnabled
         if (newState && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Предоставьте разрешение для работы поверх приложений", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.grant_overlay_permission), Toast.LENGTH_SHORT).show()
             requestOverlayPermission()
             return
         }
@@ -742,9 +761,9 @@ class MainActivity : AppCompatActivity() {
         updateFloatingModeUI(newState)
 
         if (newState) {
-            Toast.makeText(this, "✅ Работа поверх приложений: ВКЛ\nПри сворачивании откроется плавающее окно", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.floating_on_tip), Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "🛑 Работа поверх приложений: ВЫКЛ\nПри сворачивании приложение выключится", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.floating_off_tip), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -820,11 +839,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStreamingStatusUI(isStreaming: Boolean) {
         if (isStreaming) {
-            binding.statusText.text = "В ЭФИРЕ"
+            binding.statusText.setText(R.string.status_streaming)
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
             showZenUi()
         } else {
-            binding.statusText.text = "ОЖИДАНИЕ ПК"
+            binding.statusText.setText(R.string.status_waiting_pc)
             binding.statusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FFC107"))
             cancelAutoBlackout()
             if (binding.blackoutOverlay.visibility == View.VISIBLE) {
@@ -837,7 +856,7 @@ class MainActivity : AppCompatActivity() {
     private fun enableBlackout() {
         binding.blackoutOverlay.visibility = View.VISIBLE
         val lp = window.attributes
-        lp.screenBrightness = 0.01f
+        lp.screenBrightness = 0.0f
         window.attributes = lp
         cancelAutoBlackout()
     }
@@ -1042,7 +1061,8 @@ class MainActivity : AppCompatActivity() {
         val lp = window.attributes
         lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         window.attributes = lp
-        if (cameraService?.isStreamingActive() == true) {
+        cameraService?.setBlackoutEnabled(false)
+        if (cameraService?.isStreamingActive() == true && isAutoDimmingEnabled) {
             scheduleAutoBlackout()
         }
     }
@@ -1068,8 +1088,8 @@ class MainActivity : AppCompatActivity() {
             if (info != null && info.hasUpdate) {
                 availableUpdate = info
                 val sizeStr = if (info.apkSize > 0) " (${formatSize(info.apkSize)})" else ""
-                binding.tvUpdateTitle.text = "✨ Доступно обновление v${info.latestVersion}"
-                binding.tvUpdateDesc.text = "Нажмите для загрузки и установки$sizeStr"
+                binding.tvUpdateTitle.text = getString(R.string.update_available_title, info.latestVersion)
+                binding.tvUpdateDesc.text = getString(R.string.update_tap_to_install, sizeStr)
                 binding.updateBanner.visibility = View.VISIBLE
             }
         }
@@ -1079,7 +1099,7 @@ class MainActivity : AppCompatActivity() {
         isNavigatingToSettings = true
         binding.updateProgressBar.visibility = View.VISIBLE
         binding.updateProgressBar.progress = 0
-        binding.tvUpdateDesc.text = "Загрузка обновления..."
+        binding.tvUpdateDesc.setText(R.string.update_downloading)
         binding.updateBanner.isClickable = false
 
         updateManager.downloadAndInstall(
@@ -1088,16 +1108,16 @@ class MainActivity : AppCompatActivity() {
                 binding.updateProgressBar.progress = progress
                 val dlMb = (downloaded / (1024f * 1024f))
                 val totMb = (total / (1024f * 1024f))
-                binding.tvUpdateDesc.text = String.format("Загрузка: %d%% (%.1f / %.1f MB)", progress, dlMb, totMb)
+                binding.tvUpdateDesc.text = getString(R.string.update_download_progress, progress, dlMb, totMb)
                 if (progress >= 100) {
-                    binding.tvUpdateDesc.text = "Запуск установщика..."
+                    binding.tvUpdateDesc.setText(R.string.update_launching)
                 }
             },
             onError = { error ->
                 binding.updateProgressBar.visibility = View.GONE
-                binding.tvUpdateDesc.text = "Ошибка: $error. Нажмите для повтора"
+                binding.tvUpdateDesc.text = getString(R.string.update_error, error)
                 binding.updateBanner.isClickable = true
-                Toast.makeText(this, "Ошибка обновления: $error", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, getString(R.string.update_error_toast, error), Toast.LENGTH_LONG).show()
             }
         )
     }
@@ -1106,6 +1126,42 @@ class MainActivity : AppCompatActivity() {
         if (bytes <= 0) return ""
         val mb = bytes / (1024f * 1024f)
         return String.format("%.1f MB", mb)
+    }
+
+    private fun showLanguageDialog() {
+        val options = arrayOf(
+            getString(R.string.lang_system),
+            getString(R.string.lang_ru),
+            getString(R.string.lang_uk),
+            getString(R.string.lang_en)
+        )
+        val current = LocaleHelper.getSavedLanguage(this)
+        val selectedIndex = when (current) {
+            "ru" -> 1
+            "uk" -> 2
+            "en" -> 3
+            else -> 0
+        }
+
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(R.string.language_dialog_title)
+            .setSingleChoiceItems(options, selectedIndex) { dialog, which ->
+                val newLang = when (which) {
+                    1 -> "ru"
+                    2 -> "uk"
+                    3 -> "en"
+                    else -> "system"
+                }
+                LocaleHelper.setLanguage(this, newLang)
+                dialog.dismiss()
+                recreate()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun updateLanguageSelectorUI() {
+        binding.tvLanguageCode.text = LocaleHelper.getDisplayCode(this)
     }
 
     override fun onDestroy() {

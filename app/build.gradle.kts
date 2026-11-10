@@ -10,8 +10,8 @@ android {
         applicationId = "com.samsung.android.ruler"
         minSdk = 26
         targetSdk = 35
-        versionCode = 301
-        versionName = "3.0.1"
+        versionCode = 304
+        versionName = "3.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -1,0 +1,68 @@
+<resources>
+    <string name="app_name">VirtualCamNative</string>
+    <string name="action_settings">Налаштування</string>
+
+    <!-- Top Bar Status & Telemetry -->
+    <string name="status_waiting_pc">ОЧІКУВАННЯ ПК</string>
+    <string name="status_streaming">В ЕФІРІ</string>
+    <string name="battery_overheat">🔥 ПЕРЕГРІВ</string>
+    <string name="lang_display_code">🌐 UK</string>
+
+    <!-- Language Dialog -->
+    <string name="language_dialog_title">Вибір мови / Select Language</string>
+    <string name="lang_system">🌐 Авто (Система)</string>
+    <string name="lang_ru">🇷🇺 Русский</string>
+    <string name="lang_uk">🇺🇦 Українська</string>
+    <string name="lang_en">🇬🇧 English</string>
+
+    <!-- Auto Update -->
+    <string name="update_available_title">✨ Доступне оновлення v%1$s</string>
+    <string name="update_tap_to_install">Натисніть для завантаження та встановлення%1$s</string>
+    <string name="update_downloading">Завантаження оновлення…</string>
+    <string name="update_download_progress">Завантаження: %1$d%% (%2$.1f / %3$.1f MB)</string>
+    <string name="update_launching">Запуск установника…</string>
+    <string name="update_error">Помилка: %1$s. Натисніть для повтору</string>
+    <string name="update_error_toast">Помилка оновлення: %1$s</string>
+
+    <!-- Bottom Panel Controls -->
+    <string name="panel_hide">Сховати панель</string>
+    <string name="panel_control">Панель керування</string>
+    <string name="lens_macro">Макро</string>
+    <string name="lens_front">Фронт</string>
+
+    <!-- Toast Notifications & Actions -->
+    <string name="motion_detected">📱 Рух виявлено: екран увімкнено</string>
+    <string name="eco_blackout_tip">Енергозбереження: екран затемнено (порухайте телефон для пробудження)</string>
+    <string name="permissions_required">Потрібні дозволи на використання камери та мікрофона</string>
+    <string name="permission_granted_floating">Дозвіл отримано: режим поверх програм увімкнено</string>
+    <string name="permission_denied_floating">Дозвіл не надано: режим вимкнено</string>
+    <string name="cam_front">Камера: Фронтальна</string>
+    <string name="cam_back">Камера: Основна</string>
+    <string name="torch_back_only">Ліхтарик доступний лише для задньої камери</string>
+    <string name="torch_on">Ліхтарик: УВІМК</string>
+    <string name="torch_off">Ліхтарик: ВИМК</string>
+    <string name="autoframing_on">Автокадрування обличчя: УВІМК</string>
+    <string name="autoframing_off">Автокадрування обличчя: ВИМК</string>
+    <string name="stabilization_on">Стабілізація%1$s: УВІМК</string>
+    <string name="stabilization_off">Стабілізація: ВИМК</string>
+    <string name="overlay_enable_tip">Увімкніть режим поверх програм натисканням на кнопку</string>
+    <string name="gyro_eco_on">⏱️ Еко-затухання за гіроскопом (30 с): УВІМК</string>
+    <string name="gyro_eco_off">⏱️ Еко-затухання за гіроскопом: ВИМК</string>
+    <string name="grant_overlay_permission">Надайте дозвіл для роботи поверх програм</string>
+    <string name="floating_on_tip">✅ Робота поверх програм: УВІМК\nПри згортанні відкриється плаваюче вікно</string>
+    <string name="floating_off_tip">🛑 Робота поверх програм: ВИМК\nПри згортанні програма закриється</string>
+    <string name="overlay_widget_permission">Надайте дозвіл для оверлей-віджета</string>
+
+    <!-- Pairing & Foreground Service -->
+    <string name="pairing_title">Запит на підключення</string>
+    <string name="pairing_message">Комп\'ютер \"%1$s\" запитує доступ до камери. Дозволити підключення?</string>
+    <string name="pairing_allow">Дозволити</string>
+    <string name="pairing_decline">Відхилити</string>
+    <string name="notif_streaming">Трансляція активна (%1$d x %2$d)</string>
+    <string name="notif_waiting">Очікування підключення ПК…</string>
+    <string name="notif_channel_name">Служба VirtualCam</string>
+    <string name="action_camera">Камера</string>
+    <string name="action_mic">Мікрофон</string>
+    <string name="action_close">Закрити</string>
+</resources>
+

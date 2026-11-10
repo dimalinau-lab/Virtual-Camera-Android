@@ -5,6 +5,8 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTimestamp
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -43,6 +45,8 @@ class AudioStreamer(
     private var lastMuteState = false
 
     private var audioRecord: AudioRecord? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
 
     private val isRunning = AtomicBoolean(false)
     private val isConnected = AtomicBoolean(false)
@@ -127,6 +131,24 @@ class AudioStreamer(
                 record.startRecording()
                 Log.i(TAG, "Запись аудио запущена (VOICE_COMMUNICATION, 48000Hz, MONO, 16BIT, TIMEBASE_BOOTTIME)")
 
+                if (NoiseSuppressor.isAvailable()) {
+                    try {
+                        noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)?.apply {
+                            enabled = true
+                        }
+                        Log.i(TAG, "Аппаратный NoiseSuppressor успешно включен (sessionId=${record.audioSessionId})")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Не удалось включить аппаратный NoiseSuppressor", e)
+                    }
+                }
+                if (AcousticEchoCanceler.isAvailable()) {
+                    try {
+                        echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)?.apply {
+                            enabled = true
+                        }
+                    } catch (_: Exception) {}
+                }
+
                 val buffer = ByteArray(CHUNK_SIZE)
                 val audioTimestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) AudioTimestamp() else null
 
@@ -176,6 +198,16 @@ class AudioStreamer(
 
     private fun stopAudioRecording() {
         try {
+            try {
+                noiseSuppressor?.release()
+            } catch (_: Exception) {}
+            noiseSuppressor = null
+
+            try {
+                echoCanceler?.release()
+            } catch (_: Exception) {}
+            echoCanceler = null
+
             audioRecord?.let { record ->
                 if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     record.stop()
