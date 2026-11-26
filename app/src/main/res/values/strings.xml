@@ -5,8 +5,8 @@
     <!-- Top Bar Status & Telemetry -->
     <string name="status_waiting_pc">WAITING FOR PC</string>
     <string name="status_streaming">LIVE</string>
-    <string name="battery_overheat">🔥 OVERHEAT</string>
-    <string name="lang_display_code">🌐 EN</string>
+    <string name="battery_overheat">OVERHEAT</string>
+    <string name="lang_display_code">EN</string>
 
     <!-- Language Dialog -->
     <string name="language_dialog_title">Select Language / Выбор языка / Оберіть мову</string>
@@ -16,7 +16,7 @@
     <string name="lang_en">🇬🇧 English</string>
 
     <!-- Auto Update -->
-    <string name="update_available_title">✨ Update Available v%1$s</string>
+    <string name="update_available_title">Update Available v%1$s</string>
     <string name="update_tap_to_install">Tap to download and install%1$s</string>
     <string name="update_downloading">Downloading update…</string>
     <string name="update_download_progress">Downloading: %1$d%% (%2$.1f / %3$.1f MB)</string>
@@ -31,7 +31,7 @@
     <string name="lens_front">Front</string>
 
     <!-- Toast Notifications & Actions -->
-    <string name="motion_detected">📱 Motion detected: screen on</string>
+    <string name="motion_detected">Motion detected: screen on</string>
     <string name="eco_blackout_tip">Power saving: screen dimmed (move phone to wake)</string>
     <string name="permissions_required">Camera and microphone permissions are required</string>
     <string name="permission_granted_floating">Permission granted: picture-in-picture enabled</string>
@@ -46,17 +46,19 @@
     <string name="stabilization_on">Stabilization%1$s: ON</string>
     <string name="stabilization_off">Stabilization: OFF</string>
     <string name="overlay_enable_tip">Enable overlay mode by tapping the button</string>
-    <string name="gyro_eco_on">⏱️ Gyro eco-dimming (30s): ON</string>
-    <string name="gyro_eco_off">⏱️ Gyro eco-dimming: OFF</string>
+    <string name="gyro_eco_on">Gyro eco-dimming (30s): ON</string>
+    <string name="gyro_eco_off">Gyro eco-dimming: OFF</string>
     <string name="grant_overlay_permission">Grant permission to display over other apps</string>
-    <string name="floating_on_tip">✅ Picture-in-Picture: ON\nA floating preview opens when minimized</string>
-    <string name="floating_off_tip">🛑 Picture-in-Picture: OFF\nApp stops when minimized</string>
+    <string name="floating_on_tip">Picture-in-Picture: ON\nA floating preview opens when minimized</string>
+    <string name="floating_off_tip">Picture-in-Picture: OFF\nApp stops when minimized</string>
     <string name="overlay_widget_permission">Grant permission for floating overlay widget</string>
 
     <!-- Pairing & Foreground Service -->
     <string name="pairing_title">Connection Request</string>
-    <string name="pairing_message">Computer \"%1$s\" requests camera access. Allow connection?</string>
+    <string name="pairing_message">Computer \"%1$s\" requests camera stream access. Allow video transmission?</string>
     <string name="pairing_allow">Allow</string>
+    <string name="pairing_allow_always">Always Allow</string>
+    <string name="pairing_allow_once">Only Once</string>
     <string name="pairing_decline">Decline</string>
     <string name="notif_streaming">Streaming active (%1$d x %2$d)</string>
     <string name="notif_waiting">Waiting for PC connection…</string>

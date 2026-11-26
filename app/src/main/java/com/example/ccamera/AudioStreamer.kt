@@ -50,14 +50,17 @@ class AudioStreamer(
 
     private val isRunning = AtomicBoolean(false)
     private val isConnected = AtomicBoolean(false)
+    private val recordLock = Object()
 
     private val serverExecutor = Executors.newSingleThreadExecutor()
     private val recordExecutor = Executors.newSingleThreadExecutor()
 
     fun start() {
         if (isRunning.getAndSet(true)) return
-        Log.i(TAG, "Запуск AudioStreamer на порту $port")
-        startServerSocket()
+        Log.i(TAG, "Запуск AudioStreamer (MUX audioSink)")
+        if (audioSink == null) {
+            startServerSocket()
+        }
         startAudioRecording()
     }
 
@@ -197,27 +200,33 @@ class AudioStreamer(
     }
 
     private fun stopAudioRecording() {
-        try {
+        synchronized(recordLock) {
             try {
-                noiseSuppressor?.release()
-            } catch (_: Exception) {}
-            noiseSuppressor = null
+                try {
+                    noiseSuppressor?.release()
+                } catch (_: Exception) {}
+                noiseSuppressor = null
 
-            try {
-                echoCanceler?.release()
-            } catch (_: Exception) {}
-            echoCanceler = null
+                try {
+                    echoCanceler?.release()
+                } catch (_: Exception) {}
+                echoCanceler = null
 
-            audioRecord?.let { record ->
-                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                    record.stop()
+                audioRecord?.let { record ->
+                    try {
+                        if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                            record.stop()
+                        }
+                    } catch (_: Exception) {}
+                    try {
+                        record.release()
+                    } catch (_: Exception) {}
                 }
-                record.release()
+            } catch (e: Exception) {
+                Log.e(TAG, "Ошибка остановки AudioRecord", e)
+            } finally {
+                audioRecord = null
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Ошибка остановки AudioRecord", e)
-        } finally {
-            audioRecord = null
         }
     }
 
@@ -274,7 +283,9 @@ class AudioStreamer(
     fun stop() {
         if (!isRunning.getAndSet(false)) return
 
-        stopAudioRecording()
+        try {
+            audioRecord?.stop()
+        } catch (_: Exception) {}
         disconnectClientInternal()
 
         try {
@@ -284,6 +295,10 @@ class AudioStreamer(
 
         serverExecutor.shutdownNow()
         recordExecutor.shutdownNow()
+        try {
+            recordExecutor.awaitTermination(300, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {}
+        stopAudioRecording()
 
         Log.i(TAG, "AudioStreamer остановлен, сокеты и AudioRecord освобождены")
     }

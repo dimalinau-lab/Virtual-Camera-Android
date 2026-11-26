@@ -169,6 +169,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun scheduleAutoBlackout() {
         autoBlackoutHandler.removeCallbacks(autoBlackoutRunnable)
+        if (isAutoDimmingEnabled) {
+            autoBlackoutHandler.postDelayed(autoBlackoutRunnable, 30_000L)
+        }
     }
 
     private fun cancelAutoBlackout() {
@@ -320,6 +323,10 @@ class MainActivity : AppCompatActivity() {
                 cameraService?.let { service ->
                     updateFlipCameraUI(service.currentCameraFacing == "front")
                     updateTorchUI(service.isTorchOn)
+                    val st = service.getStatus()
+                    if (st.width > 0 && st.height > 0) {
+                        setupPreviewSurface(st.width, st.height)
+                    }
                 }
             }
         }
@@ -433,7 +440,11 @@ class MainActivity : AppCompatActivity() {
             isServiceBound = true
 
             cameraService?.addStatusListener(statusListener)
-            setupPreviewSurface()
+            val initStatus = cameraService?.getStatus()
+            setupPreviewSurface(
+                initStatus?.width?.takeIf { it > 0 } ?: 1920,
+                initStatus?.height?.takeIf { it > 0 } ?: 1080
+            )
             cameraService?.startCameraOnce()
             isFloatingEnabled = cameraService?.isFloatingOverlayEnabled() ?: isFloatingEnabled
             updateFloatingModeUI(isFloatingEnabled)
@@ -510,6 +521,9 @@ class MainActivity : AppCompatActivity() {
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Автоматическое пробуждение / запуск VirtualCam на ПК (WoL / USB / Wi-Fi)
+        PcWakeManager.wakePcOnLaunch(this)
 
         // Адаптивные отступы Safe Area (Samsung Galaxy S22/S23/S24/Ultra, Dynamic AMOLED, punch-hole и скругления)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, windowInsets ->
@@ -928,48 +942,118 @@ class MainActivity : AppCompatActivity() {
         if (isInPictureInPictureMode) {
             binding.blackoutOverlay.visibility = View.GONE
             binding.topBarLayout.visibility = View.GONE
-            binding.bottomActionBar.visibility = View.GONE
+            binding.bottomPanelContainer.visibility = View.GONE
             supportActionBar?.hide()
         } else {
             binding.topBarLayout.visibility = View.VISIBLE
-            binding.bottomActionBar.visibility = View.VISIBLE
+            binding.bottomPanelContainer.visibility = View.VISIBLE
             supportActionBar?.show()
             updatePipParams()
         }
     }
 
+    private var previewSurfaceW: Int = 0
+    private var previewSurfaceH: Int = 0
+    private var isPreviewLayoutListenerAttached = false
+
+    private fun applyPreviewSurfaceLayout(surfaceView: SurfaceView, bufW: Int, bufH: Int) {
+        val containerW = binding.viewFinder.width
+        val containerH = binding.viewFinder.height
+        if (containerW <= 0 || containerH <= 0 || bufW <= 0 || bufH <= 0) return
+
+        val targetAspect = bufW.toFloat() / bufH.toFloat()
+        val containerAspect = containerW.toFloat() / containerH.toFloat()
+        val (viewW, viewH) = if (containerAspect < targetAspect) {
+            Pair(containerW, Math.round(containerW / targetAspect))
+        } else {
+            Pair(Math.round(containerH * targetAspect), containerH)
+        }
+
+        val currentLp = surfaceView.layoutParams as? android.widget.FrameLayout.LayoutParams
+        if (currentLp == null || currentLp.width != viewW || currentLp.height != viewH || currentLp.gravity != android.view.Gravity.CENTER) {
+            surfaceView.layoutParams = android.widget.FrameLayout.LayoutParams(
+                viewW,
+                viewH,
+                android.view.Gravity.CENTER
+            )
+        }
+    }
+
     private fun setupPreviewSurface(width: Int = 1280, height: Int = 720) {
         binding.viewFinder.post {
-            // Находим SurfaceView внутри контейнера viewFinder
-            val surfaceView = (binding.viewFinder.getChildAt(0) as? SurfaceView) ?: run {
-                // Если контейнер пустой, создаем и добавляем SurfaceView программно
-                SurfaceView(this).also { sv ->
-                    binding.viewFinder.removeAllViews()
-                    binding.viewFinder.addView(sv)
+            val isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            // Фиксируем буфер превью на 720p с точным 16:9 аспектом: все режимы (720p/1080p/4K) имеют 16:9,
+            // что исключает пересоздание Surface и сбои Camera2 при смене разрешения, а также разгружает ISP в 4K.
+            val normW = 1280
+            val normH = if (width > 0 && height > 0) Math.round(1280f * height / width) else 720
+            val (bufW, bufH) = if (isPortrait) Pair(normH, normW) else Pair(normW, normH)
+
+            val existing = binding.viewFinder.getChildAt(0) as? SurfaceView
+            val surfaceView = existing ?: SurfaceView(this).also { sv ->
+                sv.holder.setKeepScreenOn(true)
+                previewSurfaceW = bufW
+                previewSurfaceH = bufH
+                sv.holder.setFixedSize(bufW, bufH)
+                sv.holder.addCallback(object : SurfaceHolder.Callback {
+                    override fun surfaceCreated(holder: SurfaceHolder) {
+                        Log.i(TAG, "Экранный SurfaceHolder создан: ${holder.surface}")
+                        cameraService?.setPreviewDisplaySurface(holder.surface)
+                    }
+
+                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {
+                        if (holder.surface.isValid) {
+                            cameraService?.setPreviewDisplaySurface(holder.surface)
+                        }
+                    }
+
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        Log.i(TAG, "Экранный SurfaceHolder уничтожен")
+                        cameraService?.setPreviewDisplaySurface(null)
+                    }
+                })
+                binding.viewFinder.removeAllViews()
+                val initLp = android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.Gravity.CENTER
+                )
+                val containerW = binding.viewFinder.width
+                val containerH = binding.viewFinder.height
+                if (containerW > 0 && containerH > 0 && bufW > 0 && bufH > 0) {
+                    val targetAspect = bufW.toFloat() / bufH.toFloat()
+                    val containerAspect = containerW.toFloat() / containerH.toFloat()
+                    if (containerAspect < targetAspect) {
+                        initLp.width = containerW
+                        initLp.height = Math.round(containerW / targetAspect)
+                    } else {
+                        initLp.width = Math.round(containerH * targetAspect)
+                        initLp.height = containerH
+                    }
+                }
+                binding.viewFinder.addView(sv, initLp)
+            }
+
+            if (!isPreviewLayoutListenerAttached) {
+                isPreviewLayoutListenerAttached = true
+                binding.viewFinder.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                    val newW = right - left
+                    val newH = bottom - top
+                    val oldW = oldRight - oldLeft
+                    val oldH = oldBottom - oldTop
+                    if ((newW != oldW || newH != oldH) && previewSurfaceW > 0 && previewSurfaceH > 0) {
+                        (binding.viewFinder.getChildAt(0) as? SurfaceView)?.let { sv ->
+                            applyPreviewSurfaceLayout(sv, previewSurfaceW, previewSurfaceH)
+                        }
+                    }
                 }
             }
 
-            surfaceView.holder.setKeepScreenOn(true)
-            val isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-            val (bufW, bufH) = if (isPortrait) Pair(height, width) else Pair(width, height)
-            surfaceView.holder.setFixedSize(bufW, bufH)
-            surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    Log.i(TAG, "Экранный SurfaceHolder создан: ${holder.surface}")
-                    cameraService?.setPreviewDisplaySurface(holder.surface)
-                }
-
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {
-                    if (holder.surface.isValid) {
-                        cameraService?.setPreviewDisplaySurface(holder.surface)
-                    }
-                }
-
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    Log.i(TAG, "Экранный SurfaceHolder уничтожен")
-                    cameraService?.setPreviewDisplaySurface(null)
-                }
-            })
+            if (previewSurfaceW != bufW || previewSurfaceH != bufH) {
+                previewSurfaceW = bufW
+                previewSurfaceH = bufH
+                surfaceView.holder.setFixedSize(bufW, bufH)
+            }
+            applyPreviewSurfaceLayout(surfaceView, bufW, bufH)
 
             if (surfaceView.holder.surface.isValid) {
                 cameraService?.setPreviewDisplaySurface(surfaceView.holder.surface)
@@ -986,8 +1070,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!isFloatingEnabled) {
-            Log.i(TAG, "Сворачивание при выключенном режиме поверх приложений -> освобождение камеры и остановка трансляции")
-            cameraService?.stopStreamingInternal()
+            Log.i(TAG, "Сворачивание при выключенном режиме поверх приложений -> полная остановка сервиса и камеры")
+            cameraService?.stopSelfGracefully()
         }
         if (isServiceBound) {
             cameraService?.removeStatusListener(statusListener)
@@ -1118,6 +1202,11 @@ class MainActivity : AppCompatActivity() {
                 binding.tvUpdateDesc.text = getString(R.string.update_error, error)
                 binding.updateBanner.isClickable = true
                 Toast.makeText(this, getString(R.string.update_error_toast, error), Toast.LENGTH_LONG).show()
+            },
+            onPermissionRequired = {
+                binding.updateProgressBar.visibility = View.GONE
+                binding.tvUpdateDesc.text = getString(R.string.update_tap_to_install, formatSize(update.apkSize))
+                binding.updateBanner.isClickable = true
             }
         )
     }

@@ -22,7 +22,8 @@ class ControlServer(
         fun onOrientationRequested(mode: String) // "vertical" или "horizontal"
         fun onConfigUpdated(resolution: String, fps: Int, bitrate: Int)
         fun getStatus(): StatusInfo
-        fun onRequestUserPairing(clientId: String, clientName: String, onDecision: (Boolean) -> Unit)
+        fun getDiagnosticsJson(): String = "{}"
+        fun onRequestUserPairing(clientId: String, clientName: String, onDecision: (PairingDecision) -> Unit)
     }
 
     data class StatusInfo(
@@ -82,7 +83,56 @@ class ControlServer(
         private const val TAG = "ControlServer"
     }
 
+    @Volatile
     private var lastConfigTime = 0L
+    @Volatile
+    private var lastConfigSignature: String = ""
+
+    private fun escapeJson(s: String): String {
+        val sb = StringBuilder(s.length + 8)
+        for (ch in s) {
+            when (ch) {
+                '\\' -> sb.append("\\\\")
+                '"' -> sb.append("\\\"")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> if (ch.code < 0x20) sb.append(String.format("\\u%04x", ch.code)) else sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun isLoopbackIp(ip: String): Boolean {
+        return ip == "127.0.0.1" || ip == "::1" || ip == "0:0:0:0:0:0:0:1"
+    }
+
+    private fun isRequestAuthorized(
+        session: IHTTPSession,
+        jsonObj: JSONObject?,
+        parms: Map<String, List<String>>
+    ): Boolean {
+        val remoteIp = session.remoteIpAddress ?: ""
+        // Локальный USB-туннель (adb forward) доверен, но отклоняем браузерные cross-origin CSRF-запросы
+        if (isLoopbackIp(remoteIp)) {
+            val origin = session.headers["origin"]
+            val referer = session.headers["referer"]
+            if (origin.isNullOrBlank() && referer.isNullOrBlank()) {
+                return true
+            }
+        }
+        val headerToken = session.headers["x-auth-token"] ?: ""
+        val token = headerToken.ifBlank {
+            jsonObj?.optString("auth_token", "")
+                ?.ifBlank { parms["auth_token"]?.firstOrNull() ?: "" }
+                ?: (parms["auth_token"]?.firstOrNull() ?: "")
+        }
+        if (token.isBlank()) return false
+
+        val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+        if (prefs.all.values.contains(token)) return true
+        return PairingManager.isEphemeralTokenValid(token)
+    }
 
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
@@ -112,45 +162,62 @@ class ControlServer(
                 }
             }
 
+            if (uri != "/api/pair" && uri != "/api/connect" && uri != "/api/unpair") {
+                if (!isRequestAuthorized(session, jsonObj, parms)) {
+                    Log.w(TAG, "Неавторизованный запрос отклонен: $uri от ${session.remoteIpAddress}")
+                    return newJsonResponse(
+                        Response.Status.UNAUTHORIZED,
+                        "{\"status\":\"unauthorized\",\"error\":\"Valid auth_token required\"}"
+                    )
+                }
+            }
+
             when (uri) {
                 "/api/pair" -> {
-                    val clientId = jsonObj?.optString("client_id") ?: parms["client_id"]?.firstOrNull() ?: ""
-                    val clientName = jsonObj?.optString("client_name", "PC") ?: parms["client_name"]?.firstOrNull() ?: "PC"
+                    val clientId = jsonObj?.optString("client_id", "")?.ifBlank { null }
+                        ?: parms["client_id"]?.firstOrNull()?.ifBlank { null }
+                        ?: ""
+                    val clientName = jsonObj?.optString("client_name", "PC")?.ifBlank { "PC" }
+                        ?: parms["client_name"]?.firstOrNull()?.ifBlank { "PC" }
+                        ?: "PC"
 
                     if (clientId.isBlank()) {
                         return newJsonResponse(Response.Status.BAD_REQUEST, "{\"status\":\"error\",\"message\":\"Missing client_id\"}")
                     }
 
                     val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+                    // Не раскрываем старый токен без явного подтверждения пользователя (защита от кражи токена по client_id)
+                    val decisionPromise = CompletableFuture<PairingDecision>()
 
-                    if (prefs.contains(clientId)) {
-                        val token = prefs.getString(clientId, "") ?: ""
-                        return newJsonResponse(
-                            Response.Status.OK,
-                            "{\"status\":\"paired\",\"auth_token\":\"$token\"}"
-                        )
-                    }
-
-                    val decisionPromise = CompletableFuture<Boolean>()
-
-                    callback.onRequestUserPairing(clientId, clientName) { allowed ->
-                        decisionPromise.complete(allowed)
+                    callback.onRequestUserPairing(clientId, clientName) { decision ->
+                        decisionPromise.complete(decision)
                     }
 
                     return try {
-                        val allowed = decisionPromise.get(20, TimeUnit.SECONDS)
-                        if (allowed) {
-                            val newToken = UUID.randomUUID().toString()
-                            prefs.edit().putString(clientId, newToken).apply()
-                            newJsonResponse(
-                                Response.Status.OK,
-                                "{\"status\":\"paired\",\"auth_token\":\"$newToken\"}"
-                            )
-                        } else {
-                            newJsonResponse(
-                                Response.Status.UNAUTHORIZED,
-                                "{\"status\":\"rejected\",\"message\":\"User rejected pairing\"}"
-                            )
+                        val decision = decisionPromise.get(25, TimeUnit.SECONDS)
+                        when (decision) {
+                            PairingDecision.ALLOW_ALWAYS -> {
+                                val newToken = UUID.randomUUID().toString()
+                                prefs.edit().putString(clientId, newToken).apply()
+                                newJsonResponse(
+                                    Response.Status.OK,
+                                    "{\"status\":\"paired\",\"auth_token\":\"$newToken\",\"type\":\"always\"}"
+                                )
+                            }
+                            PairingDecision.ALLOW_ONCE -> {
+                                val newToken = UUID.randomUUID().toString()
+                                PairingManager.addEphemeralToken(newToken)
+                                newJsonResponse(
+                                    Response.Status.OK,
+                                    "{\"status\":\"paired\",\"auth_token\":\"$newToken\",\"type\":\"once\"}"
+                                )
+                            }
+                            PairingDecision.REJECT -> {
+                                newJsonResponse(
+                                    Response.Status.UNAUTHORIZED,
+                                    "{\"status\":\"rejected\",\"message\":\"User rejected pairing\"}"
+                                )
+                            }
                         }
                     } catch (_: Exception) {
                         newJsonResponse(
@@ -160,47 +227,102 @@ class ControlServer(
                     }
                 }
                 "/api/connect" -> {
-                    val mode = jsonObj?.optString("mode", "usb") ?: queryMode ?: "usb"
-                    val clientToken = jsonObj?.optString("auth_token", "") ?: parms["auth_token"]?.firstOrNull() ?: ""
+                    val remoteIp = session.remoteIpAddress ?: ""
+                    val isUsbLoopback = isLoopbackIp(remoteIp)
+                    val mode = if (isUsbLoopback) (jsonObj?.optString("mode", "usb") ?: queryMode ?: "usb") else "wifi"
+                    val clientToken = (session.headers["x-auth-token"] ?: "").ifBlank {
+                        jsonObj?.optString("auth_token", "")?.ifBlank { parms["auth_token"]?.firstOrNull() ?: "" }
+                            ?: (parms["auth_token"]?.firstOrNull() ?: "")
+                    }
 
-                    if (mode != "usb") {
-                        val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
-                        val allTokens = prefs.all.values
-                        val isAuthorized = clientToken.isNotBlank() && allTokens.contains(clientToken)
+                    val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+                    val allTokens = prefs.all.values
+                    val isPersistentAuthorized = clientToken.isNotBlank() && allTokens.contains(clientToken)
+                    val isEphemeralAuthorized = clientToken.isNotBlank() && PairingManager.isEphemeralTokenValid(clientToken)
+                    var isAuthorized = isPersistentAuthorized || isEphemeralAuthorized || isUsbLoopback
+                    var issuedToken = clientToken
 
-                        if (!isAuthorized) {
-                            Log.w("ROUTING_DEBUG", "Отказ подключения /api/connect: устройства нет в сопряженных или токен недействителен")
-                            return newJsonResponse(
-                                Response.Status.UNAUTHORIZED,
-                                "{\"status\":\"unauthorized\",\"message\":\"Device not paired or pairing revoked\"}"
-                            )
+                    if (!isAuthorized) {
+                        val pcMac = jsonObj?.optString("pc_mac", "") ?: ""
+                        val clientId = jsonObj?.optString("client_id", "")?.ifBlank { null }
+                            ?: ("pc-" + (pcMac.ifBlank { remoteIp.ifBlank { "unknown" } }))
+                        val clientName = jsonObj?.optString("client_name", "")?.ifBlank { null }
+                            ?: remoteIp.ifBlank { "PC" }
+                        val decisionPromise = CompletableFuture<PairingDecision>()
+
+                        callback.onRequestUserPairing(clientId, clientName) { decision ->
+                            decisionPromise.complete(decision)
+                        }
+
+                        try {
+                            val decision = decisionPromise.get(25, TimeUnit.SECONDS)
+                            when (decision) {
+                                PairingDecision.ALLOW_ALWAYS -> {
+                                    val newToken = UUID.randomUUID().toString()
+                                    prefs.edit().putString(clientId, newToken).apply()
+                                    issuedToken = newToken
+                                    isAuthorized = true
+                                }
+                                PairingDecision.ALLOW_ONCE -> {
+                                    val newToken = UUID.randomUUID().toString()
+                                    PairingManager.addEphemeralToken(newToken)
+                                    issuedToken = newToken
+                                    isAuthorized = true
+                                }
+                                PairingDecision.REJECT -> {
+                                    isAuthorized = false
+                                }
+                            }
+                        } catch (_: Exception) {
+                            isAuthorized = false
                         }
                     }
 
+                    if (!isAuthorized) {
+                        Log.w("ROUTING_DEBUG", "Отказ подключения /api/connect: устройства нет в сопряженных или токен недействителен")
+                        return newJsonResponse(
+                            Response.Status.UNAUTHORIZED,
+                            "{\"status\":\"unauthorized\",\"message\":\"Device not paired or pairing revoked\"}"
+                        )
+                    }
+
+                    val pcMac = jsonObj?.optString("pc_mac", "") ?: ""
+                    val pcIp = jsonObj?.optString("pc_ip", "")?.ifBlank { null } ?: remoteIp
+                    PcWakeManager.savePcInfo(context, mac = pcMac, ip = pcIp, mode = mode)
+
                     callback.onConnectRequested(mode)
-                    return newJsonResponse(Response.Status.OK, "{\"status\":\"connected\"}")
+                    val respJson = if (issuedToken.isNotBlank()) {
+                        "{\"status\":\"connected\",\"auth_token\":\"${escapeJson(issuedToken)}\"}"
+                    } else {
+                        "{\"status\":\"connected\"}"
+                    }
+                    return newJsonResponse(Response.Status.OK, respJson)
                 }
                 "/api/unpair" -> {
                     val tokenToRemove = jsonObj?.optString("token", "") ?: parms["token"]?.firstOrNull() ?: ""
                     val clientIdToRemove = jsonObj?.optString("client_id", "") ?: parms["client_id"]?.firstOrNull() ?: ""
-
                     val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
-                    val editor = prefs.edit()
-
-                    if (clientIdToRemove.isNotBlank()) {
-                        editor.remove(clientIdToRemove)
+                    val hasValidToken = tokenToRemove.isNotBlank() &&
+                        (prefs.all.values.contains(tokenToRemove) || PairingManager.isEphemeralTokenValid(tokenToRemove))
+                    if (!isRequestAuthorized(session, jsonObj, parms) && !hasValidToken) {
+                        return newJsonResponse(
+                            Response.Status.UNAUTHORIZED,
+                            "{\"status\":\"unauthorized\",\"error\":\"Valid auth_token required\"}"
+                        )
                     }
 
                     if (tokenToRemove.isNotBlank()) {
-                        for ((key, value) in prefs.all) {
-                            if (value == tokenToRemove) {
-                                editor.remove(key)
-                            }
-                        }
+                        PairingManager.revokeToken(context, tokenToRemove)
+                    }
+                    if (clientIdToRemove.isNotBlank()) {
+                        val prefs = context.getSharedPreferences("vcam_paired_clients", Context.MODE_PRIVATE)
+                        prefs.edit().remove(clientIdToRemove).apply()
                     }
 
-                    editor.apply()
-                    Log.i("ROUTING_DEBUG", "Сопряжение успешно отозвано (/api/unpair)")
+                    // Вариант 3-А: Очищаем также сохраненные данные ПК в PcWakeManager, чтобы смартфон не будил забытый ПК
+                    PcWakeManager.clearPcInfo(context)
+
+                    Log.i("ROUTING_DEBUG", "Сопряжение успешно отозвано (/api/unpair), кэш ПК сброшен")
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"unpaired\"}")
                 }
                 "/api/disconnect" -> {
@@ -208,25 +330,25 @@ class ControlServer(
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"message\":\"Disconnected\"}")
                 }
                 "/api/orientation" -> {
-                    val mode = queryMode ?: jsonObj?.optString("mode", "vertical") ?: "vertical"
-                    callback.onOrientationRequested(mode.lowercase())
-                    return newFixedLengthResponse(
+                    val mode = (queryMode ?: jsonObj?.optString("mode", "vertical") ?: "vertical").lowercase()
+                    callback.onOrientationRequested(mode)
+                    return newJsonResponse(
                         Response.Status.OK,
-                        "application/json",
-                        "{\"status\":\"ok\",\"mode\":\"${mode.lowercase()}\"}"
+                        "{\"status\":\"ok\",\"mode\":\"${escapeJson(mode)}\"}"
                     )
                 }
                 "/api/config" -> {
-                    val now = System.currentTimeMillis()
-                    if (now - lastConfigTime < 300) {
-                        Log.w("ROUTING_DEBUG", "Пропуск дублирующего запроса config (дребезг ${now - lastConfigTime}мс)")
-                        return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"message\":\"debounced\"}")
-                    }
-                    lastConfigTime = now
-
                     val resolution = jsonObj?.optString("resolution", "1080p") ?: parms["resolution"]?.firstOrNull() ?: "1080p"
                     val fps = jsonObj?.optInt("fps", 30) ?: parms["fps"]?.firstOrNull()?.toIntOrNull() ?: 30
                     val bitrate = jsonObj?.optInt("bitrate", 7_000_000) ?: parms["bitrate"]?.firstOrNull()?.toIntOrNull() ?: 7_000_000
+                    val sig = "$resolution:$fps:$bitrate"
+                    val now = System.currentTimeMillis()
+                    if (sig == lastConfigSignature && now - lastConfigTime < 150) {
+                        Log.w("ROUTING_DEBUG", "Пропуск идентичного запроса config ($sig, ${now - lastConfigTime}мс)")
+                        return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"message\":\"debounced\"}")
+                    }
+                    lastConfigSignature = sig
+                    lastConfigTime = now
                     Log.i("ROUTING_DEBUG", "ControlServer: /api/config -> resolution=$resolution, fps=$fps, bitrate=$bitrate")
                     callback.onConfigUpdated(resolution, fps, bitrate)
                     return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\"}")
@@ -252,45 +374,45 @@ class ControlServer(
                         val status = callback.getStatus()
                         return newJsonResponse(
                             Response.Status.OK,
-                            "{\"status\":\"ok\",\"action\":\"$action\",\"stabilization\":${status.isStabilization},\"has_ois\":${status.hasOis},\"has_eis\":${status.hasEis}}"
+                            "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\",\"stabilization\":${status.isStabilization},\"has_ois\":${status.hasOis},\"has_eis\":${status.hasEis}}"
                         )
                     }
                     if (action == "set_camera_unit") {
                         val status = callback.getStatus()
                         return newJsonResponse(
                             Response.Status.OK,
-                            "{\"status\":\"ok\",\"action\":\"$action\",\"current_camera_unit\":\"${status.currentCameraUnit}\"}"
+                            "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\",\"current_camera_unit\":\"${escapeJson(status.currentCameraUnit)}\"}"
                         )
                     }
                     if (action == "toggle_mic_mute") {
                         val status = callback.getStatus()
                         return newJsonResponse(
                             Response.Status.OK,
-                            "{\"status\":\"ok\",\"action\":\"$action\",\"mic_muted\":${status.isMicMuted}}"
+                            "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\",\"mic_muted\":${status.isMicMuted}}"
                         )
                     }
                     if (action == "set_lens") {
                         val status = callback.getStatus()
                         return newJsonResponse(
                             Response.Status.OK,
-                            "{\"status\":\"ok\",\"action\":\"$action\",\"lens\":\"${status.currentLens}\",\"zoom\":${status.currentZoom}}"
+                            "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\",\"lens\":\"${escapeJson(status.currentLens)}\",\"zoom\":${status.currentZoom}}"
                         )
                     }
                     if (action == "set_zoom") {
                         val status = callback.getStatus()
                         return newJsonResponse(
                             Response.Status.OK,
-                            "{\"status\":\"ok\",\"action\":\"$action\",\"zoom\":${status.currentZoom}}"
+                            "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\",\"zoom\":${status.currentZoom}}"
                         )
                     }
                     if (action == "set_manual_exposure" || action == "set_manual_focus" || action == "set_awb_mode") {
                         val status = callback.getStatus()
                         return newJsonResponse(
                             Response.Status.OK,
-                            "{\"status\":\"ok\",\"action\":\"$action\",\"manual_exposure\":${status.isManualExposure},\"iso\":${status.iso},\"manual_focus\":${status.isManualFocus},\"focus_distance\":${status.focusDistance},\"awb_mode\":\"${status.awbMode}\"}"
+                            "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\",\"manual_exposure\":${status.isManualExposure},\"iso\":${status.iso},\"manual_focus\":${status.isManualFocus},\"focus_distance\":${status.focusDistance},\"awb_mode\":\"${escapeJson(status.awbMode)}\"}"
                         )
                     }
-                    return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"action\":\"$action\"}")
+                    return newJsonResponse(Response.Status.OK, "{\"status\":\"ok\",\"action\":\"${escapeJson(action)}\"}")
                 }
                 "/api/manual_exposure" -> {
                     val p = jsonObj ?: JSONObject()
@@ -316,7 +438,7 @@ class ControlServer(
                     val status = callback.getStatus()
                     return newJsonResponse(
                         Response.Status.OK,
-                        "{\"status\":\"ok\",\"awb_mode\":\"${status.awbMode}\"}"
+                        "{\"status\":\"ok\",\"awb_mode\":\"${escapeJson(status.awbMode)}\"}"
                     )
                 }
                 "/api/lens" -> {
@@ -326,7 +448,7 @@ class ControlServer(
                     val status = callback.getStatus()
                     return newJsonResponse(
                         Response.Status.OK,
-                        "{\"status\":\"ok\",\"lens\":\"${status.currentLens}\",\"zoom\":${status.currentZoom}}"
+                        "{\"status\":\"ok\",\"lens\":\"${escapeJson(status.currentLens)}\",\"zoom\":${status.currentZoom}}"
                     )
                 }
                 "/api/zoom" -> {
@@ -361,7 +483,7 @@ class ControlServer(
                     val status = callback.getStatus()
                     return newJsonResponse(
                         Response.Status.OK,
-                        "{\"status\":\"ok\",\"current_camera_unit\":\"${status.currentCameraUnit}\"}"
+                        "{\"status\":\"ok\",\"current_camera_unit\":\"${escapeJson(status.currentCameraUnit)}\"}"
                     )
                 }
                 "/api/status" -> {
@@ -423,10 +545,13 @@ class ControlServer(
                     }.toString()
                     return newJsonResponse(Response.Status.OK, responseJson)
                 }
+                "/api/diagnostics" -> {
+                    return newJsonResponse(Response.Status.OK, callback.getDiagnosticsJson())
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка обработки HTTP запроса", e)
-            return newJsonResponse(Response.Status.INTERNAL_ERROR, "{\"error\":\"${e.message}\"}")
+            return newJsonResponse(Response.Status.INTERNAL_ERROR, "{\"error\":\"${escapeJson(e.message ?: "internal_error")}\"}")
         }
 
         return newJsonResponse(Response.Status.NOT_FOUND, "{\"error\":\"not_found\"}")
@@ -434,8 +559,7 @@ class ControlServer(
 
     private fun newJsonResponse(status: Response.Status, json: String): Response {
         val resp = newFixedLengthResponse(status, "application/json", json)
-        resp.addHeader("Access-Control-Allow-Origin", "*")
-        resp.addHeader("Access-Control-Allow-Headers", "Content-Type")
+        resp.addHeader("Cache-Control", "no-store")
         return resp
     }
 }

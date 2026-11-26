@@ -26,6 +26,66 @@ class UpdateManager(private val context: Context) {
     companion object {
         private const val TAG = "UpdateManager"
         private const val GITHUB_API_URL = "https://api.github.com/repos/dimalinau-lab/Virtual-Camera-Android/releases/latest"
+        private val ALLOWED_DOWNLOAD_HOSTS = setOf(
+            "github.com",
+            "api.github.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "github-releases.githubusercontent.com",
+            "codeload.github.com"
+        )
+    }
+
+    private fun isAllowedDownloadUrl(rawUrl: String): Boolean {
+        return try {
+            val uri = Uri.parse(rawUrl)
+            val scheme = uri.scheme?.lowercase() ?: return false
+            val host = uri.host?.lowercase() ?: return false
+            scheme == "https" && ALLOWED_DOWNLOAD_HOSTS.any { host == it || host.endsWith(".$it") }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun verifyApkPackageAndSignature(apkFile: File): Boolean {
+        return try {
+            val pm = context.packageManager
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                android.content.pm.PackageManager.GET_SIGNATURES
+            }
+            val installedInfo = pm.getPackageInfo(context.packageName, flags)
+            val archiveInfo = pm.getPackageArchiveInfo(apkFile.absolutePath, flags) ?: return false
+            if (archiveInfo.packageName != context.packageName) {
+                Log.e(TAG, "Blocked APK with mismatched packageName: ${archiveInfo.packageName}")
+                return false
+            }
+
+            fun extractDigests(info: android.content.pm.PackageInfo): Set<String> {
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                val sigs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    info.signingInfo?.apkContentsSigners ?: emptyArray()
+                } else {
+                    info.signatures ?: emptyArray()
+                }
+                return sigs.map { sig ->
+                    md.digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+                }.toSet()
+            }
+
+            val installedDigests = extractDigests(installedInfo)
+            val archiveDigests = extractDigests(archiveInfo)
+            val match = installedDigests.isNotEmpty() && archiveDigests.any { it in installedDigests }
+            if (!match) {
+                Log.e(TAG, "Blocked APK with untrusted signing certificate")
+            }
+            match
+        } catch (e: Exception) {
+            Log.e(TAG, "APK verification error", e)
+            false
+        }
     }
 
     data class UpdateInfo(
@@ -108,10 +168,16 @@ class UpdateManager(private val context: Context) {
     fun downloadAndInstall(
         updateInfo: UpdateInfo,
         onProgress: (Int, Long, Long) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onPermissionRequired: (() -> Unit)? = null
     ) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                if (!isAllowedDownloadUrl(updateInfo.downloadUrl)) {
+                    withContext(Dispatchers.Main) { onError("Недоверенный источник загрузки обновления") }
+                    return@launch
+                }
+
                 val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
                 val targetFile = File(updatesDir, "VirtualCam-v${updateInfo.latestVersion}.apk")
                 if (targetFile.exists()) {
@@ -122,8 +188,12 @@ class UpdateManager(private val context: Context) {
                 var connection: HttpURLConnection? = null
                 var redirectCount = 0
 
-                // Поддержка HTTP 301 / 302 редиректов (GitHub Assets -> AWS S3)
+                // Поддержка HTTP 301 / 302 редиректов (только HTTPS и разрешенные домены GitHub)
                 while (redirectCount < 5) {
+                    if (!isAllowedDownloadUrl(currentUrl)) {
+                        withContext(Dispatchers.Main) { onError("Заблокирован редирект на недоверенный домен") }
+                        return@launch
+                    }
                     val url = URL(currentUrl)
                     connection = (url.openConnection() as HttpURLConnection).apply {
                         instanceFollowRedirects = false
@@ -179,9 +249,21 @@ class UpdateManager(private val context: Context) {
                 }
                 connection.disconnect()
 
+                if (totalDownloaded <= 0L || (totalLength > 0 && totalDownloaded < (totalLength * 0.95).toLong())) {
+                    targetFile.delete()
+                    withContext(Dispatchers.Main) { onError("APK загружен не полностью") }
+                    return@launch
+                }
+
+                if (!verifyApkPackageAndSignature(targetFile)) {
+                    targetFile.delete()
+                    withContext(Dispatchers.Main) { onError("Ошибка проверки подписи APK") }
+                    return@launch
+                }
+
                 withContext(Dispatchers.Main) {
                     onProgress(100, totalDownloaded, totalLength)
-                    installApk(targetFile)
+                    installApk(targetFile, onPermissionRequired, onError)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error downloading update: ${e.message}", e)
@@ -192,10 +274,15 @@ class UpdateManager(private val context: Context) {
         }
     }
 
-    fun installApk(apkFile: File) {
+    fun installApk(
+        apkFile: File,
+        onPermissionRequired: (() -> Unit)? = null,
+        onError: ((String) -> Unit)? = null
+    ) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (!context.packageManager.canRequestPackageInstalls()) {
+                    onPermissionRequired?.invoke()
                     val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
                         data = Uri.parse("package:${context.packageName}")
                         if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -222,6 +309,7 @@ class UpdateManager(private val context: Context) {
             context.startActivity(installIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch installer intent: ${e.message}", e)
+            onError?.invoke(e.localizedMessage ?: "Не удалось открыть установщик")
         }
     }
 

@@ -1,41 +1,14 @@
-## VirtualCam v3.0.4
+# VirtualCam Companion v3.0.4 — Android Release Notes
 
-### Русский
-
-- Исправлено отсутствие реакции ползунка громкости звука в веб-интерфейсе.
-- Исправлена рассинхронизация состояния громкости и отключения звука между сервером и аудиоприемником.
-- Исправлено некорректное отображение и дублирование системных микрофонов в списке устройств WASAPI.
-- Исправлены артефакты подавления шума при превышении порога гейта на ПК.
-- Исправлена работа аппаратного шумоподавления и эхоподавления при захвате аудиопотока на Android.
-- Исправлено отсутствие перевода интерфейса на украинский, русский и английский языки в Android-приложении.
-- Исправлено отсутствие локализации названий объективов в панели быстрого выбора камер на Android.
-- Исправлено отсутствие локализации диалоговых окон и элементов управления режима «Картинка в картинке» (PiP).
-
-#### Контрольные суммы (SHA-256)
-- `VirtualCam_Update.zip`: `b66ebc95513a6021abd88b8c4f7a0f5c402d0955ed2a9f486ff53911265f81cf`
-- `VirtualCam-v3.0.4.zip`: `b66ebc95513a6021abd88b8c4f7a0f5c402d0955ed2a9f486ff53911265f81cf`
-- `VirtualCam-v3.0.4.apk`: `7d0e8450333d28690a7dafc3b8c3b378e614ced3dea0d552e0a4b9f2455faeff`
-- `VirtualCamNative_Update.zip`: `b66ebc95513a6021abd88b8c4f7a0f5c402d0955ed2a9f486ff53911265f81cf`
-- `VirtualCam.exe`: `f28588c827e28e829103255e02a07a2e711b61381e9f9c8120c7df9dec2cb159`
-- `VirtualCamNative.exe`: `f28588c827e28e829103255e02a07a2e711b61381e9f9c8120c7df9dec2cb159`
+**Release Date:** 2026-11-21  
+**Target:** Android 8.0+ (ARM64-v8a / Camera2 HAL3)
 
 ---
 
-### English
+### Изменения в версии 3.0.4
+* **Системные оверлеи и уведомления:** Очищены текстовые строки фоновой службы трансляции и Picture-in-Picture оверлея от декоративных символов.
+* **Локализация:** Полная поддержка системной локализации (Русский, Українська, English) для всех системных диалогов, названий объективов и настроек.
+* **Энергосбережение:** Оптимизирован режим эко-затухания экрана по датчику гироскопа и аппаратный захват Camera2 60 FPS.
 
-- Fixed unresponsive audio volume slider in the web interface.
-- Fixed volume level and mute state desynchronization between HTTP server and audio receiver.
-- Fixed duplicate and confusing system microphone entries in the WASAPI device list.
-- Fixed audio distortion artifacts during noise expander gate transitions on PC.
-- Fixed disabled hardware noise suppressor and acoustic echo canceler during Android audio capture.
-- Fixed missing localization for Ukrainian, Russian, and English with system language fallback in Android app.
-- Fixed unlocalized lens switcher labels in Android camera control bar.
-- Fixed unlocalized dialogs and action controls in Android Picture-in-Picture (PiP) mode.
-
-#### Checksums (SHA-256)
-- `VirtualCam_Update.zip`: `b66ebc95513a6021abd88b8c4f7a0f5c402d0955ed2a9f486ff53911265f81cf`
-- `VirtualCam-v3.0.4.zip`: `b66ebc95513a6021abd88b8c4f7a0f5c402d0955ed2a9f486ff53911265f81cf`
-- `VirtualCam-v3.0.4.apk`: `7d0e8450333d28690a7dafc3b8c3b378e614ced3dea0d552e0a4b9f2455faeff`
-- `VirtualCamNative_Update.zip`: `b66ebc95513a6021abd88b8c4f7a0f5c402d0955ed2a9f486ff53911265f81cf`
-- `VirtualCam.exe`: `f28588c827e28e829103255e02a07a2e711b61381e9f9c8120c7df9dec2cb159`
-- `VirtualCamNative.exe`: `f28588c827e28e829103255e02a07a2e711b61381e9f9c8120c7df9dec2cb159`
+#### Контрольная сумма SHA-256
+* `VirtualCam-v3.0.4.apk`: `377c882de2918b0e091276f535a1c7590cf05742fd54fbb74e4cf073232d258b`

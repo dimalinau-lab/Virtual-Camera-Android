@@ -12,6 +12,10 @@ class UdpBeaconBroadcaster(private val deviceId: String) {
     @Volatile private var isRunning = false
     private var broadcastThread: Thread? = null
     private var probeListenerThread: Thread? = null
+    @Volatile
+    private var activeBroadcastSocket: DatagramSocket? = null
+    @Volatile
+    private var activeProbeSocket: DatagramSocket? = null
 
     companion object {
         private const val TAG = "UdpBeacon"
@@ -52,19 +56,34 @@ class UdpBeaconBroadcaster(private val deviceId: String) {
         }.toString()
         val bytes = json.toByteArray()
 
-        // 1. Поток периодического широковещания (быстрый старт + subnet broadcast)
+        // 1. Поток периодического широковещания (быстрый старт + subnet broadcast + auto-wake)
         broadcastThread = Thread {
             var socket: DatagramSocket? = null
             try {
                 socket = DatagramSocket()
                 socket.broadcast = true
+                activeBroadcastSocket = socket
 
                 var count = 0
                 while (isRunning) {
                     val bcastList = getBroadcastAddresses()
+                    val isWakeBurst = count < 10
+                    val currentJson = JSONObject().apply {
+                        put("service", "VirtualCamNative")
+                        put("device_name", "${Build.MANUFACTURER} ${Build.MODEL}")
+                        put("device_id", deviceId)
+                        put("port", httpPort)
+                        put("http_port", httpPort)
+                        put("stream_port", 8554)
+                        if (isWakeBurst) {
+                            put("action", "wake")
+                        }
+                    }.toString()
+                    val currentBytes = currentJson.toByteArray()
+
                     for (bcast in bcastList) {
                         try {
-                            val packet = DatagramPacket(bytes, bytes.size, bcast, port)
+                            val packet = DatagramPacket(currentBytes, currentBytes.size, bcast, port)
                             socket.send(packet)
                         } catch (_: Exception) {}
                     }
@@ -79,7 +98,8 @@ class UdpBeaconBroadcaster(private val deviceId: String) {
             } catch (e: Exception) {
                 Log.w(TAG, "Ошибка в потоке UdpBeaconBroadcaster", e)
             } finally {
-                socket?.close()
+                activeBroadcastSocket = null
+                try { socket?.close() } catch (_: Exception) {}
             }
         }.apply { isDaemon = true; start() }
 
@@ -87,8 +107,12 @@ class UdpBeaconBroadcaster(private val deviceId: String) {
         probeListenerThread = Thread {
             var probeSocket: DatagramSocket? = null
             try {
-                probeSocket = DatagramSocket(8889)
-                probeSocket.broadcast = true
+                probeSocket = DatagramSocket(null).apply {
+                    reuseAddress = true
+                    broadcast = true
+                    bind(java.net.InetSocketAddress(8889))
+                }
+                activeProbeSocket = probeSocket
                 val buf = ByteArray(512)
 
                 while (isRunning) {
@@ -105,13 +129,18 @@ class UdpBeaconBroadcaster(private val deviceId: String) {
                 }
             } catch (_: Exception) {
             } finally {
-                probeSocket?.close()
+                try { probeSocket?.close() } catch (_: Exception) {}
+                if (activeProbeSocket === probeSocket) activeProbeSocket = null
             }
         }.apply { isDaemon = true; start() }
     }
 
     fun stop() {
         isRunning = false
+        try { activeProbeSocket?.close() } catch (_: Exception) {}
+        try { activeBroadcastSocket?.close() } catch (_: Exception) {}
+        activeProbeSocket = null
+        activeBroadcastSocket = null
         broadcastThread?.interrupt()
         probeListenerThread?.interrupt()
         broadcastThread = null

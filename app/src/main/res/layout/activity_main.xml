@@ -9,7 +9,7 @@
     tools:context=".MainActivity">
 
     <!-- 1. Live Camera Preview Surface -->
-    <androidx.camera.view.PreviewView
+    <FrameLayout
         android:id="@+id/viewFinder"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />

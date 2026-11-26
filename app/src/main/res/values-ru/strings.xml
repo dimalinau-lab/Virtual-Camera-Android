@@ -5,8 +5,8 @@
     <!-- Top Bar Status & Telemetry -->
     <string name="status_waiting_pc">ОЖИДАНИЕ ПК</string>
     <string name="status_streaming">В ЭФИРЕ</string>
-    <string name="battery_overheat">🔥 ПЕРЕГРЕВ</string>
-    <string name="lang_display_code">🌐 RU</string>
+    <string name="battery_overheat">ПЕРЕГРЕВ</string>
+    <string name="lang_display_code">RU</string>
 
     <!-- Language Dialog -->
     <string name="language_dialog_title">Выбор языка / Select Language</string>
@@ -16,7 +16,7 @@
     <string name="lang_en">🇬🇧 English</string>
 
     <!-- Auto Update -->
-    <string name="update_available_title">✨ Доступно обновление v%1$s</string>
+    <string name="update_available_title">Доступно обновление v%1$s</string>
     <string name="update_tap_to_install">Нажмите для загрузки и установки%1$s</string>
     <string name="update_downloading">Загрузка обновления…</string>
     <string name="update_download_progress">Загрузка: %1$d%% (%2$.1f / %3$.1f MB)</string>
@@ -31,7 +31,7 @@
     <string name="lens_front">Фронт</string>
 
     <!-- Toast Notifications & Actions -->
-    <string name="motion_detected">📱 Движение обнаружено: экран включен</string>
+    <string name="motion_detected">Движение обнаружено: экран включен</string>
     <string name="eco_blackout_tip">Энергосбережение: экран затемнен (подвигайте телефон для пробуждения)</string>
     <string name="permissions_required">Требуются разрешения на использование камеры и микрофона</string>
     <string name="permission_granted_floating">Разрешение получено: режим поверх приложений включен</string>
@@ -46,17 +46,19 @@
     <string name="stabilization_on">Стабилизация%1$s: ВКЛ</string>
     <string name="stabilization_off">Стабилизация: ВЫКЛ</string>
     <string name="overlay_enable_tip">Включите режим поверх приложений нажатием на кнопку</string>
-    <string name="gyro_eco_on">⏱️ Эко-затухание по гироскопу (30 сек): ВКЛ</string>
-    <string name="gyro_eco_off">⏱️ Эко-затухание по гироскопу: ВЫКЛ</string>
+    <string name="gyro_eco_on">Эко-затухание по гироскопу (30 сек): ВКЛ</string>
+    <string name="gyro_eco_off">Эко-затухание по гироскопу: ВЫКЛ</string>
     <string name="grant_overlay_permission">Предоставьте разрешение для работы поверх приложений</string>
-    <string name="floating_on_tip">✅ Работа поверх приложений: ВКЛ\nПри сворачивании откроется плавающее окно</string>
-    <string name="floating_off_tip">🛑 Работа поверх приложений: ВЫКЛ\nПри сворачивании приложение выключится</string>
+    <string name="floating_on_tip">Работа поверх приложений: ВКЛ\nПри сворачивании откроется плавающее окно</string>
+    <string name="floating_off_tip">Работа поверх приложений: ВЫКЛ\nПри сворачивании приложение выключится</string>
     <string name="overlay_widget_permission">Предоставьте разрешение для оверлей-виджета</string>
 
     <!-- Pairing & Foreground Service -->
     <string name="pairing_title">Запрос подключения</string>
-    <string name="pairing_message">Компьютер \"%1$s\" запрашивает доступ к камере. Разрешить подключение?</string>
+    <string name="pairing_message">Компьютер \"%1$s\" запрашивает доступ к видеопотоку камеры. Разрешить передачу?</string>
     <string name="pairing_allow">Разрешить</string>
+    <string name="pairing_allow_always">Разрешить всегда</string>
+    <string name="pairing_allow_once">Только сейчас</string>
     <string name="pairing_decline">Отклонить</string>
     <string name="notif_streaming">Трансляция активна (%1$d x %2$d)</string>
     <string name="notif_waiting">Ожидание подключения ПК…</string>

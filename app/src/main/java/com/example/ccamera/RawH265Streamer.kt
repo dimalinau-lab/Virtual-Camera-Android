@@ -51,7 +51,11 @@ class RawH265Streamer(
     private var lastAbrDropMs: Long = 0L
     private var lastAbrRecoverMs: Long = 0L
 
+    @Volatile
     private var mediaCodec: MediaCodec? = null
+    private val codecLock = Object()
+    @Volatile
+    private var isReinitInProgress = false
     var inputSurface: Surface? = null
         private set
 
@@ -123,9 +127,18 @@ class RawH265Streamer(
             System.arraycopy(src, 0, pkt.data, 0, length)
         }
 
-        while (packetQueue.size >= 16) {
-            val old = packetQueue.poll()
-            if (old != null) recyclePacket(old)
+        while (packetQueue.size >= 32) {
+            // Бережём системные/конфиг пакеты и ключевые кадры при переполнении очереди
+            val dropTarget = packetQueue.firstOrNull { it.type == PKT_VIDEO_FRAME && !it.isKey }
+                ?: packetQueue.firstOrNull { it.isVideo && !it.isKey }
+                ?: packetQueue.peekFirst()
+                ?: break
+            if (!packetQueue.remove(dropTarget)) {
+                val old = packetQueue.poll()
+                if (old != null) recyclePacket(old)
+            } else {
+                recyclePacket(dropTarget)
+            }
         }
 
         packetQueue.offer(pkt)
@@ -150,9 +163,18 @@ class RawH265Streamer(
             buffer.position(origPos)
         }
 
-        while (packetQueue.size >= 16) {
-            val old = packetQueue.poll()
-            if (old != null) recyclePacket(old)
+        while (packetQueue.size >= 32) {
+            // Бережём системные/конфиг пакеты и ключевые кадры при переполнении очереди
+            val dropTarget = packetQueue.firstOrNull { it.type == PKT_VIDEO_FRAME && !it.isKey }
+                ?: packetQueue.firstOrNull { it.isVideo && !it.isKey }
+                ?: packetQueue.peekFirst()
+                ?: break
+            if (!packetQueue.remove(dropTarget)) {
+                val old = packetQueue.poll()
+                if (old != null) recyclePacket(old)
+            } else {
+                recyclePacket(dropTarget)
+            }
         }
 
         packetQueue.offer(pkt)
@@ -170,14 +192,14 @@ class RawH265Streamer(
 
     fun checkAbrCongestion(ageMs: Long) {
         val now = SystemClock.elapsedRealtime()
-        if (ageMs > 200L) {
-            if (now - lastAbrDropMs > 2000L && bitRate > 1_500_000) {
-                val reduced = (bitRate * 0.70).toInt().coerceAtLeast(1_000_000)
-                Log.w(TAG, "[ABR] Очередь $ageMs мс > 200 мс! Снижение битрейта: $bitRate -> $reduced")
+        if (ageMs > 180L) {
+            if (now - lastAbrDropMs > 3000L && bitRate > 1_500_000) {
+                val reduced = (bitRate * 0.75).toInt().coerceAtLeast(1_000_000)
+                Log.w(TAG, "[ABR] Очередь $ageMs мс > 180 мс! Снижение битрейта: $bitRate -> $reduced")
                 updateBitrate(reduced)
                 lastAbrDropMs = now
             }
-        } else if (ageMs < 50L && bitRate < nominalBitrate) {
+        } else if (ageMs < 60L && bitRate < nominalBitrate) {
             if (now - lastAbrDropMs > 5000L && now - lastAbrRecoverMs > 3000L) {
                 val recovered = (bitRate + 500_000).coerceAtMost(nominalBitrate)
                 Log.i(TAG, "[ABR] Сеть свободна ($ageMs мс). Восстановление: $bitRate -> $recovered")
@@ -188,8 +210,8 @@ class RawH265Streamer(
     }
 
     fun checkLatencyDrop(ageMs: Long) {
-        if (ageMs > 450L) {
-            Log.w(TAG, "[LATENCY DROP] Задержка очереди $ageMs мс > 450 мс! Сброс видеоочереди...")
+        if (ageMs > 300L) {
+            Log.w(TAG, "[LATENCY DROP] Задержка очереди $ageMs мс > 300 мс! Сброс видеоочереди...")
             flushVideoQueue()
             requestKeyFrame()
         }
@@ -219,6 +241,7 @@ class RawH265Streamer(
 
     fun updateBitrate(newBitrate: Int) {
         this.bitRate = newBitrate
+        this.nominalBitrate = maxOf(this.nominalBitrate, newBitrate)
         try {
             val params = Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, newBitrate)
@@ -247,14 +270,19 @@ class RawH265Streamer(
         this.height = newHeight
         this.frameRate = newFps
         this.bitRate = newBitrate
+        this.nominalBitrate = newBitrate
 
         flushVideoQueue()
         synchronized(this) {
             cachedCsdBuffer = null
         }
 
-        stopCodecOnly()
-        initMediaCodec()
+        isReinitInProgress = true
+        synchronized(codecLock) {
+            stopCodecOnly()
+            initMediaCodec()
+            isReinitInProgress = false
+        }
         return inputSurface
     }
 
@@ -292,46 +320,89 @@ class RawH265Streamer(
         mediaCodec = null
     }
 
+    private fun buildVideoFormat(useVbr: Boolean, operatingRate: Int, useIntraRefresh: Boolean): MediaFormat {
+        return MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                if (useVbr) MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                else MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+            )
+            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+            setInteger(MediaFormat.KEY_CAPTURE_RATE, frameRate)
+
+            if (useIntraRefresh && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, frameRate)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3)
+            } else {
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            }
+
+            // Ультра-низкая задержка (Ultra Low-Latency):
+            setInteger("latency", 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                setInteger(MediaFormat.KEY_LATENCY, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                if (operatingRate > 0) {
+                    setInteger(MediaFormat.KEY_OPERATING_RATE, operatingRate)
+                }
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            }
+        }
+    }
+
     private fun initMediaCodec() {
         try {
             stopCodecOnly()
 
-            val repeatFrameUs = 1000000L / frameRate
+            val is4K = (width >= 3840 || height >= 2160)
+            val isHighFps = (frameRate >= 60)
+            // Для 4K и 60 FPS избегаем зажимания частоты VPU через низкий operatingRate и Intra-Refresh
+            val attempts = if (is4K) {
+                listOf(
+                    Triple(true, maxOf(frameRate, 60), false),
+                    Triple(false, maxOf(frameRate, 60), false),
+                    Triple(false, frameRate, true)
+                )
+            } else if (isHighFps) {
+                listOf(
+                    Triple(false, maxOf(frameRate * 2, 120), false),
+                    Triple(false, frameRate, false),
+                    Triple(false, frameRate, true)
+                )
+            } else {
+                listOf(
+                    Triple(false, frameRate, true),
+                    Triple(false, frameRate, false)
+                )
+            }
 
-            val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-                setInteger(MediaFormat.KEY_CAPTURE_RATE, frameRate)
-                
-                // Cyclic Intra Refresh (равномерный битрейт без забивания сети резкими I-кадрами)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, frameRate)
-                }
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3) // Устраняем тепловой конфликт/дублирование с Intra-Refresh
-
-                // Ультра-низкая задержка (Ultra Low-Latency):
-                setInteger("latency", 0)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    setInteger(MediaFormat.KEY_LATENCY, 0)
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    // Согласуем частоту чипа VPU с реальным FPS вместо принудительного оверклока Short.MAX_VALUE
-                    setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate)
-                    setInteger(MediaFormat.KEY_PRIORITY, 0)
-                }
-                // 3. Отключаем B-кадры и скрытую задержку чипа
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            var configuredCodec: MediaCodec? = null
+            var lastError: Exception? = null
+            for ((useVbr, opRate, intraRefresh) in attempts) {
+                var candidate: MediaCodec? = null
+                try {
+                    candidate = MediaCodec.createEncoderByType(MIME_TYPE)
+                    val format = buildVideoFormat(useVbr, opRate, intraRefresh)
+                    candidate.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    configuredCodec = candidate
+                    Log.i(TAG, "MediaCodec сконфигурирован ($width x $height @ $frameRate fps, vbr=$useVbr, opRate=$opRate, intra=$intraRefresh)")
+                    break
+                } catch (e: Exception) {
+                    lastError = e
+                    try { candidate?.release() } catch (_: Exception) {}
                 }
             }
 
-            val codec = MediaCodec.createEncoderByType(MIME_TYPE)
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val codec = configuredCodec ?: throw (lastError ?: RuntimeException("Failed to configure HEVC MediaCodec"))
             inputSurface = codec.createInputSurface()
             codec.start()
             mediaCodec = codec
@@ -339,7 +410,7 @@ class RawH265Streamer(
             synchronized(this) {
                 cachedCsdBuffer = null
             }
-            Log.i(TAG, "MediaCodec Surface готов ($width x $height @ $frameRate fps, CBR, repeatFrameAfter=${repeatFrameUs}us)")
+            Log.i(TAG, "MediaCodec Surface готов ($width x $height @ $frameRate fps, bitrate=$bitRate)")
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка инициализации MediaCodec", e)
             listener?.onStatusChanged("Ошибка кодека: ${e.message}", false)
@@ -359,8 +430,9 @@ class RawH265Streamer(
                     try {
                         val socket = ss.accept()
                         socket.tcpNoDelay = true // Отключаем задержку Nagle для мгновенной отправки
+                        socket.keepAlive = true
                         socket.trafficClass = 0x10 // IPTOS_LOWDELAY для приоритетной сетевой отправки
-                        socket.sendBufferSize = 512 * 1024 // 512 КБ буфер сокета для сглаживания всплесков I-кадров
+                        socket.sendBufferSize = 256 * 1024 // 256 КБ буфер сокета: баланс под 4K IDR без скрытой очереди
 
                         var stream: DataOutputStream
                         synchronized(this) {
@@ -439,9 +511,25 @@ class RawH265Streamer(
             header[0] = 0x4D.toByte() // 'M'
             header[1] = 0x43.toByte() // 'C'
 
+            var lastPacketSentMs = SystemClock.elapsedRealtime()
             while (isRunning.get()) {
                 try {
-                    val pkt = packetQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
+                    val pkt = packetQueue.poll(50, TimeUnit.MILLISECONDS)
+                    if (pkt == null) {
+                        val nowMs = SystemClock.elapsedRealtime()
+                        if (isConnected.get() && nowMs - lastPacketSentMs >= 1500L) {
+                            val stream = dataOutputStream
+                            if (stream != null) {
+                                header[2] = PKT_PING
+                                header[3] = 0
+                                for (i in 4..15) header[i] = 0
+                                stream.write(header, 0, 16)
+                                stream.flush()
+                                lastPacketSentMs = nowMs
+                            }
+                        }
+                        continue
+                    }
                     if (!isConnected.get() || (isPaused && pkt.isVideo)) {
                         recyclePacket(pkt)
                         continue
@@ -475,7 +563,10 @@ class RawH265Streamer(
                     if (len > 0) {
                         stream.write(pkt.data, 0, len)
                     }
-                    stream.flush()
+                    if (pkt.isVideo || packetQueue.isEmpty()) {
+                        stream.flush()
+                    }
+                    lastPacketSentMs = SystemClock.elapsedRealtime()
                     recyclePacket(pkt)
                 } catch (e: Exception) {
                     if (isRunning.get() && isConnected.get()) {
@@ -497,6 +588,10 @@ class RawH265Streamer(
             Log.i("ROUTING_DEBUG", "Поток чтения MediaCodec запущен")
 
             while (isRunning.get()) {
+                if (isReinitInProgress) {
+                    try { Thread.sleep(5) } catch (_: Exception) {}
+                    continue
+                }
                 val codec = mediaCodec
                 if (codec == null) {
                     try { Thread.sleep(10) } catch (_: Exception) {}
@@ -504,49 +599,58 @@ class RawH265Streamer(
                 }
 
                 try {
-                    val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
-                    if (outputBufferIndex >= 0) {
-                        val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
-                        if (outputBuffer != null && bufferInfo.size > 0) {
-                            if (frameCount < 5) {
-                                Log.i("ROUTING_DEBUG", "Кодек выдал кадр #${frameCount}, размер: ${bufferInfo.size} байт, флаги: ${bufferInfo.flags}")
+                    synchronized(codecLock) {
+                        if (mediaCodec !== codec || isReinitInProgress) return@synchronized
+                        var outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 5_000L)
+                        while (outputBufferIndex >= 0) {
+                            val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
+                            if (outputBuffer != null && bufferInfo.size > 0) {
                                 frameCount++
-                            }
+                                if (frameCount <= 5) {
+                                    Log.i("ROUTING_DEBUG", "Кодек выдал кадр #${frameCount}, размер: ${bufferInfo.size} байт, флаги: ${bufferInfo.flags}")
+                                }
 
-                            val nowNs = System.nanoTime()
-                            if (lastFrameTimeNs != 0L) {
-                                val deltaMs = (nowNs - lastFrameTimeNs) / 1_000_000f
-                                totalDeltaMs += deltaMs.toLong()
-                                if (frameCount % 60 == 0) {
-                                    val avgDeltaMs = totalDeltaMs.toFloat() / 60f
-                                    val calcFps = if (avgDeltaMs > 0) 1000f / avgDeltaMs else 0f
-                                    Log.i(TAG, "MediaCodec output: дельта между буферами = ${String.format(java.util.Locale.US, "%.1f", deltaMs)}мс (~${String.format(java.util.Locale.US, "%.1f", calcFps)} FPS)")
-                                    totalDeltaMs = 0L
+                                val nowNs = System.nanoTime()
+                                if (lastFrameTimeNs != 0L) {
+                                    val deltaMs = (nowNs - lastFrameTimeNs) / 1_000_000f
+                                    totalDeltaMs += deltaMs.toLong()
+                                    if (frameCount % 60 == 0) {
+                                        val avgDeltaMs = totalDeltaMs.toFloat() / 60f
+                                        val calcFps = if (avgDeltaMs > 0) 1000f / avgDeltaMs else 0f
+                                        Log.i(TAG, "MediaCodec output: дельта между буферами = ${String.format(java.util.Locale.US, "%.1f", deltaMs)}мс (~${String.format(java.util.Locale.US, "%.1f", calcFps)} FPS)")
+                                        totalDeltaMs = 0L
+                                    }
+                                }
+                                lastFrameTimeNs = nowNs
+
+                                outputBuffer.position(bufferInfo.offset)
+                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+
+                                val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                                val isKeyFrame = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+
+                                if (isCodecConfig) {
+                                    cacheCsdBuffer(outputBuffer, bufferInfo)
+                                    enqueuePacket(PKT_VIDEO_CONFIG, 0x03, outputBuffer, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, isVideo = true, isKey = true)
+                                } else if (isConnected.get() && !isPaused && bufferInfo.size > 0) {
+                                    val ageMs = queueAgeMs
+                                    checkAbrCongestion(ageMs)
+                                    checkLatencyDrop(ageMs)
+
+                                    val flags: Byte = if (isKeyFrame) 0x01 else 0x00
+                                    enqueuePacket(PKT_VIDEO_FRAME, flags, outputBuffer, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, isVideo = true, isKey = isKeyFrame)
                                 }
                             }
-                            lastFrameTimeNs = nowNs
-
-                            outputBuffer.position(bufferInfo.offset)
-                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-
-                            val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-                            val isKeyFrame = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-
-                            if (isCodecConfig) {
-                                cacheCsdBuffer(outputBuffer, bufferInfo)
-                                enqueuePacket(PKT_VIDEO_CONFIG, 0x03, outputBuffer, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, isVideo = true, isKey = true)
-                            } else if (isConnected.get() && !isPaused && bufferInfo.size > 0) {
-                                val ageMs = queueAgeMs
-                                checkAbrCongestion(ageMs)
-                                checkLatencyDrop(ageMs)
-
-                                val flags: Byte = if (isKeyFrame) 0x01 else 0x00
-                                enqueuePacket(PKT_VIDEO_FRAME, flags, outputBuffer, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, isVideo = true, isKey = isKeyFrame)
-                            }
+                            codec.releaseOutputBuffer(outputBufferIndex, false)
+                            if (!isRunning.get() || isReinitInProgress) break
+                            outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0L)
                         }
-                        codec.releaseOutputBuffer(outputBufferIndex, false)
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    if (isRunning.get() && !isReinitInProgress) {
+                        Log.w(TAG, "MediaCodec output loop warning: ${e.message}")
+                    }
+                }
             }
         }
     }

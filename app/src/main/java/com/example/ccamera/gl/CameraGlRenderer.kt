@@ -118,27 +118,39 @@ class CameraGlRenderer(
     @Volatile
     var isFrontCamera: Boolean = false
     @Volatile
+    var sensorOrientation: Int = 90
+    @Volatile
     private var lastPresentationTimeNs: Long = 0L
 
     private val codecTexMatrix = FloatArray(16)
     private val cancelRotMatrix = FloatArray(16)
+    private val previewAspectMatrix = FloatArray(16)
+    private val previewCropMatrix = FloatArray(16)
 
     fun setOrientation(degrees: Int) {
         orientationDegrees = degrees
     }
 
     private fun getCodecTexMatrix(): FloatArray {
-        // SurfaceTexture.getTransformMatrix() автоматически включает поворот сенсора (90° для задней камеры, 270° для фронтальной).
+        // SurfaceTexture.getTransformMatrix() включает поворот сенсора (обычно 90° для задней камеры, 270° для фронтальной).
         // Поскольку ПК (D3D11 оптика) сам аппаратно разворачивает кадры по протоколу MagerCam (g_streamOrientation),
-        // для потока в кодек (codecWin) мы компенсируем этот поворот, делая буфер кодека 100% идентичным прямому режиму (Direct Surface).
-        val cancelAngle = if (isFrontCamera) 90.0f else -90.0f
+        // для потока в кодек (codecWin) мы компенсируем sensorOrientation, сохраняя идентичность Direct Surface.
+        val normSensor = ((sensorOrientation % 360) + 360) % 360
+        val cancelAngle = when (normSensor) {
+            90 -> -90.0f
+            270 -> 90.0f
+            180 -> 180.0f
+            else -> 0.0f
+        }
         Matrix.setIdentityM(cancelRotMatrix, 0)
-        Matrix.translateM(cancelRotMatrix, 0, 0.5f, 0.5f, 0.0f)
-        Matrix.rotateM(cancelRotMatrix, 0, cancelAngle, 0.0f, 0.0f, 1.0f)
-        Matrix.translateM(cancelRotMatrix, 0, -0.5f, -0.5f, 0.0f)
-
-        Matrix.multiplyMM(codecTexMatrix, 0, texMatrix, 0, cancelRotMatrix, 0)
-        return codecTexMatrix
+        if (cancelAngle != 0.0f) {
+            Matrix.translateM(cancelRotMatrix, 0, 0.5f, 0.5f, 0.0f)
+            Matrix.rotateM(cancelRotMatrix, 0, cancelAngle, 0.0f, 0.0f, 1.0f)
+            Matrix.translateM(cancelRotMatrix, 0, -0.5f, -0.5f, 0.0f)
+            Matrix.multiplyMM(codecTexMatrix, 0, texMatrix, 0, cancelRotMatrix, 0)
+            return codecTexMatrix
+        }
+        return texMatrix
     }
 
     init {
@@ -244,7 +256,7 @@ class CameraGlRenderer(
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
             val rawPts = st.timestamp
-            val nowNs = System.nanoTime()
+            val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
             val ptsNs = if (rawPts > lastPresentationTimeNs && (rawPts - lastPresentationTimeNs) < 2_000_000_000L) {
                 rawPts
             } else if (nowNs > lastPresentationTimeNs) {
@@ -264,14 +276,16 @@ class CameraGlRenderer(
             codecWin.swapBuffers()
 
             // 2. Отрисовка в локальный видоискатель (экран телефона / плавающее окно)
-            previewWindowSurface?.let { previewWin ->
-                previewWin.makeCurrent()
-                val pW = previewWin.width
-                val pH = previewWin.height
-                if (pW > 0 && pH > 0) {
-                    GLES20.glViewport(0, 0, pW, pH)
-                    renderQuad(isForPreview = true, targetWidth = pW, targetHeight = pH)
-                    previewWin.swapBuffers()
+            if (previewSurface?.isValid == true) {
+                previewWindowSurface?.let { previewWin ->
+                    previewWin.makeCurrent()
+                    val pW = previewWin.width
+                    val pH = previewWin.height
+                    if (pW > 0 && pH > 0) {
+                        GLES20.glViewport(0, 0, pW, pH)
+                        renderQuad(isForPreview = true, targetWidth = pW, targetHeight = pH)
+                        previewWin.swapBuffers()
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -283,7 +297,27 @@ class CameraGlRenderer(
         GLES20.glUseProgram(programId)
 
         val activeTexMatrix = if (!isForPreview) getCodecTexMatrix() else texMatrix
-        val activeCropMatrix = autoFraming.cropMatrix
+        val activeCropMatrix = if (isForPreview && targetWidth > 0 && targetHeight > 0 && width > 0 && height > 0) {
+            val isRotated90 = kotlin.math.abs(texMatrix[0]) < 0.1f && kotlin.math.abs(texMatrix[1]) > 0.5f
+            val srcW = if (isRotated90) height else width
+            val srcH = if (isRotated90) width else height
+            val srcAspect = srcW.toFloat() / srcH.toFloat()
+            val dstAspect = targetWidth.toFloat() / targetHeight.toFloat()
+            if (kotlin.math.abs(srcAspect - dstAspect) > 0.01f) {
+                val scaleX = if (dstAspect < srcAspect) dstAspect / srcAspect else 1.0f
+                val scaleY = if (dstAspect > srcAspect) srcAspect / dstAspect else 1.0f
+                Matrix.setIdentityM(previewAspectMatrix, 0)
+                Matrix.translateM(previewAspectMatrix, 0, 0.5f, 0.5f, 0.0f)
+                Matrix.scaleM(previewAspectMatrix, 0, scaleX, scaleY, 1.0f)
+                Matrix.translateM(previewAspectMatrix, 0, -0.5f, -0.5f, 0.0f)
+                Matrix.multiplyMM(previewCropMatrix, 0, autoFraming.cropMatrix, 0, previewAspectMatrix, 0)
+                previewCropMatrix
+            } else {
+                autoFraming.cropMatrix
+            }
+        } else {
+            autoFraming.cropMatrix
+        }
 
         GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, activeTexMatrix, 0)
         GLES20.glUniformMatrix4fv(uCropMatrixLoc, 1, false, activeCropMatrix, 0)
@@ -305,17 +339,34 @@ class CameraGlRenderer(
     }
 
     fun setPreviewSurface(surface: Surface?) {
+        val syncLock = Object()
+        var done = false
         glHandler.post {
-            previewWindowSurface?.release()
-            previewWindowSurface = null
-            previewSurface = surface
-            if (surface != null && surface.isValid) {
-                eglCore?.let { core ->
-                    try {
-                        previewWindowSurface = EglWindowSurface(core, surface)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Ошибка создания previewWindowSurface", e)
+            synchronized(syncLock) {
+                try {
+                    previewWindowSurface?.release()
+                    previewWindowSurface = null
+                    previewSurface = surface
+                    if (surface != null && surface.isValid) {
+                        eglCore?.let { core ->
+                            try {
+                                previewWindowSurface = EglWindowSurface(core, surface)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Ошибка создания previewWindowSurface", e)
+                            }
+                        }
                     }
+                } finally {
+                    done = true
+                    syncLock.notifyAll()
+                }
+            }
+        }
+        // По контракту SurfaceHolder.Callback.surfaceDestroyed рендер в Surface должен завершиться до возврата
+        if (surface == null && android.os.Looper.myLooper() != glThread.looper) {
+            synchronized(syncLock) {
+                if (!done) {
+                    try { syncLock.wait(400) } catch (_: InterruptedException) {}
                 }
             }
         }

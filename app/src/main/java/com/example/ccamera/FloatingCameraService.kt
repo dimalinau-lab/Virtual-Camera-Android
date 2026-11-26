@@ -18,6 +18,7 @@ import android.graphics.Rect
 import org.json.JSONObject
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -25,6 +26,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
 import com.example.ccamera.gl.CameraGlRenderer
 import android.net.wifi.WifiManager
 import android.os.Binder
@@ -149,12 +151,12 @@ class FloatingCameraService : Service(),
             val newFps = minOf(targetFps, 30)
             val newBitrate = minOf(targetBitrate, 6_000_000)
             if (newFps != targetFps || newBitrate != targetBitrate) {
-                applyStreamConfig(if (targetWidth >= 1920) "1080p" else "720p", newFps, newBitrate)
+                applyStreamConfig(if (targetWidth >= 1920) "1080p" else "720p", newFps, newBitrate, persist = false)
             }
         } else if (tempC <= 40.5f && isHeatThrottled) {
             isHeatThrottled = false
             Log.i(TAG, "[HEAT GUARD] Температура нормализована: ${tempC}°C <= 40.5°C. Восстановление исходных параметров: $preHeatFps FPS, $preHeatBitrate bps")
-            applyStreamConfig(if (targetWidth >= 1920) "1080p" else "720p", preHeatFps, preHeatBitrate)
+            applyStreamConfig(if (targetWidth >= 1920) "1080p" else "720p", preHeatFps, preHeatBitrate, persist = false)
         }
     }
     private var currentOrientationMode: String = "auto"
@@ -389,6 +391,13 @@ class FloatingCameraService : Service(),
                 updateNotification(getNotificationStatusText())
                 return START_STICKY
             }
+        }
+
+        val hasCameraPerm = ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (!hasCameraPerm) {
+            Log.w(TAG, "Нет разрешения CAMERA при запуске сервиса -> остановка во избежание ForegroundServiceSecurityException")
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         try {
@@ -723,6 +732,9 @@ class FloatingCameraService : Service(),
         if (audioStreamer == null) {
             try {
                 audioStreamer = AudioStreamer(8555).apply {
+                    audioSink = { pcm, size, ptsUs ->
+                        streamer?.enqueueAudio(pcm, size, ptsUs)
+                    }
                     start()
                 }
             } catch (e: Exception) {
@@ -785,6 +797,7 @@ class FloatingCameraService : Service(),
     }
 
     fun setPreviewDisplaySurface(surface: Surface?) {
+        val prevDisplay = displaySurface
         activityDisplaySurface = surface
         isActivityInForeground = (surface != null && surface.isValid)
         if (surface != null && surface.isValid) {
@@ -800,6 +813,10 @@ class FloatingCameraService : Service(),
 
         if (glRenderer != null) {
             glRenderer?.setPreviewSurface(displaySurface)
+            return
+        }
+
+        if (displaySurface == prevDisplay && cameraCaptureSession != null) {
             return
         }
 
@@ -846,6 +863,7 @@ class FloatingCameraService : Service(),
             synchronized(cameraLock) {
                 if (isCameraBusy) {
                     Log.w("ROUTING_DEBUG", "Камера уже открывается/переключается, пропуск")
+                    isSwitching = false
                     return@post
                 }
                 isCameraBusy = true
@@ -933,7 +951,6 @@ class FloatingCameraService : Service(),
                             Log.i("ROUTING_DEBUG", "Camera2 openCamera onOpened: id=${camera.id}")
                             cameraDevice = camera
                             isCameraBusy = false
-                            isSwitching = false
                             startCamera2Session(camera)
                         }
 
@@ -970,6 +987,42 @@ class FloatingCameraService : Service(),
         }
     }
 
+    private var highSpeedFallbackTried = false
+    @Volatile
+    private var activeSelectedRange: Range<Int> = Range(30, 30)
+    @Volatile
+    private var useHighSpeedActive: Boolean = false
+    @Volatile
+    private var lastSessionDiag: String = "init"
+    @Volatile
+    private var actualCaptureFps: Float = 0f
+    @Volatile
+    private var lastSensorFrameDurationNs: Long = 0L
+    @Volatile
+    private var lastSensorExposureNs: Long = 0L
+    @Volatile
+    private var lastSensorIso: Int = 0
+    private var captureFpsWindowStartNs: Long = 0L
+    private var captureFpsCounter: Int = 0
+
+    private fun pickBestFpsRange(ranges: List<Range<Int>>, desiredFps: Int): Range<Int> {
+        if (ranges.isEmpty()) return Range(minOf(desiredFps, 30), minOf(desiredFps, 30))
+        if (desiredFps >= 60) {
+            return ranges.firstOrNull { it.lower == 60 && it.upper == 60 }
+                ?: ranges.filter { it.upper >= 60 }.maxWithOrNull(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
+                ?: ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
+                ?: ranges.filter { it.upper == 30 }.maxWithOrNull(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
+                ?: ranges.maxWithOrNull(compareBy<Range<Int>> { it.upper }.thenBy { it.lower })
+                ?: Range(30, 30)
+        }
+        return ranges.firstOrNull { it.lower == desiredFps && it.upper == desiredFps }
+            ?: ranges.filter { it.upper == desiredFps }.maxWithOrNull(compareBy<Range<Int>> { it.lower })
+            ?: ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
+            ?: ranges.filter { it.upper <= 30 }.maxWithOrNull(compareBy<Range<Int>> { it.upper }.thenBy { it.lower })
+            ?: ranges.maxWithOrNull(compareBy<Range<Int>> { it.upper }.thenBy { it.lower })
+            ?: Range(30, 30)
+    }
+
     private fun startCamera2Session(camera: CameraDevice) {
         Log.i("ROUTING_DEBUG", "startCamera2Session: camera.id = ${camera.id}")
         val codecSurface = streamer?.inputSurface ?: run {
@@ -982,15 +1035,69 @@ class FloatingCameraService : Service(),
         }
 
         try {
-            val surfaces = mutableListOf<Surface>()
+            val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val chars = manager.getCameraCharacteristics(camera.id)
+            sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (currentCameraFacingName == "front") 270 else 90)
+
+            val targetChars = if (activePhysicalCameraId != null) {
+                try { manager.getCameraCharacteristics(activePhysicalCameraId!!) } catch (_: Exception) { chars }
+            } else chars
+            val availableFpsRanges = targetChars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?: chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            val normalRanges = availableFpsRanges?.filter { it.upper <= 60 } ?: emptyList()
+
+            val streamMap = targetChars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?: chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val hsRanges = try {
+                val targetSize = android.util.Size(targetWidth, targetHeight)
+                val hsSizes = streamMap?.highSpeedVideoSizes ?: emptyArray()
+                if (hsSizes.contains(targetSize)) {
+                    streamMap?.getHighSpeedVideoFpsRangesFor(targetSize)?.toList() ?: emptyList()
+                } else {
+                    emptyList()
+                }
+            } catch (_: Exception) { emptyList() }
+
+            val validHsRanges = hsRanges.filter { it.upper in 60..120 }
+
+            val hwNormalUpper = normalRanges.map { it.upper }.maxOrNull() ?: 30
+            val hwHsUpper = validHsRanges.map { it.upper }.maxOrNull() ?: 0
+            val hwUpper = maxOf(hwNormalUpper, minOf(hwHsUpper, 60))
+
             val isAuxCam = (camera.id != "0" && camera.id != "1")
-            if (isAutoFramingEnabled || useGlPipeline || isAuxCam) {
+            val isAux30Capped = (camera.id == ultraWideCameraId || camera.id == macroCameraId ||
+                                 camera.id == "50" || camera.id == "54") && (hwUpper <= 30)
+            val maxSensorFps = if (isAux30Capped || currentCameraFacingName == "front") hwUpper else maxOf(hwUpper, 60)
+            activeMaxFps = maxSensorFps
+            val effectiveSensorFps = minOf(targetFps, maxSensorFps)
+            activeSupportedFps = (normalRanges.map { it.upper } + validHsRanges.map { it.upper } + listOf(30, 60)).distinct().sorted()
+
+            val hasNormalFixed60 = normalRanges.any { it.lower == 60 && it.upper == 60 }
+            val hasHs60 = validHsRanges.isNotEmpty()
+            val is4KStream = (targetWidth >= 3840 || targetHeight >= 2160)
+
+            val useHighSpeedSession = !highSpeedFallbackTried &&
+                effectiveSensorFps >= 60 &&
+                !is4KStream &&
+                activePhysicalCameraId == null &&
+                !isAuxCam &&
+                !hasNormalFixed60 &&
+                hasHs60
+            useHighSpeedActive = useHighSpeedSession
+
+            // Для обычного 60 FPS используем единый SurfaceTexture через GL, чтобы Camera2 не резал FPS из-за 2-х Surface.
+            // Для ConstrainedHighSpeed используем прямой codecSurface (HAL MediaTek/Samsung часто отклоняет SurfaceTexture в HS).
+            val needGlForHighFps = (!useHighSpeedSession && effectiveSensorFps >= 60 && !is4KStream && activePhysicalCameraId == null)
+
+            val surfaces = mutableListOf<Surface>()
+            if (!useHighSpeedSession && (isAutoFramingEnabled || useGlPipeline || isAuxCam || needGlForHighFps)) {
                 try {
                     glRenderer?.release()
                 } catch (_: Exception) {}
                 val renderer = CameraGlRenderer(targetWidth, targetHeight, codecSurface)
                 renderer.setOrientation(streamOrientation())
                 renderer.isFrontCamera = (currentCameraFacingName == "front")
+                renderer.sensorOrientation = sensorOrientation
                 renderer.autoFraming.isEnabled = isAutoFramingEnabled
                 renderer.setPreviewSurface(displaySurface)
                 glRenderer = renderer
@@ -998,7 +1105,7 @@ class FloatingCameraService : Service(),
                 val camTarget = renderer.cameraSurface
                 if (camTarget != null && camTarget.isValid) {
                     surfaces.add(camTarget)
-                    Log.i("ROUTING_DEBUG", "Пайплайн OpenGL ES (isAuxCam=$isAuxCam): добавлен SurfaceTexture таргет ($camTarget)")
+                    Log.i("ROUTING_DEBUG", "Пайплайн OpenGL ES (isAuxCam=$isAuxCam, highFps=$needGlForHighFps): добавлен SurfaceTexture таргет ($camTarget)")
                 } else {
                     surfaces.add(codecSurface)
                 }
@@ -1010,11 +1117,11 @@ class FloatingCameraService : Service(),
 
                 if (codecSurface.isValid) {
                     surfaces.add(codecSurface)
-                    Log.i("ROUTING_DEBUG", "Пайплайн Direct Surface: прямой вывод в кодек ($codecSurface)")
+                    Log.i("ROUTING_DEBUG", "Пайплайн Direct Surface (highSpeed=$useHighSpeedSession): прямой вывод в кодек ($codecSurface)")
                 }
                 val dispSurf = displaySurface
-                // Для физического потока камеры (activePhysicalCameraId) или AUX камеры нельзя добавлять второй Surface, так как HAL физической камеры ограничен 1 Surface
-                if (activePhysicalCameraId == null && !isAuxCam && dispSurf != null && dispSurf.isValid) {
+                // Для HighSpeed, физического потока или AUX камеры держим строго 1 Surface во избежание 30 FPS / HAL reject
+                if (!useHighSpeedSession && activePhysicalCameraId == null && !isAuxCam && dispSurf != null && dispSurf.isValid) {
                     surfaces.add(dispSurf)
                     Log.i("ROUTING_DEBUG", "Добавлена поверхность локального видоискателя ($dispSurf)")
                 }
@@ -1024,10 +1131,6 @@ class FloatingCameraService : Service(),
             for (s in surfaces) {
                 builder.addTarget(s)
             }
-
-            val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val chars = manager.getCameraCharacteristics(camera.id)
-            sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (currentCameraFacingName == "front") 270 else 90)
 
             if (activePhysicalCameraId != null) {
                 minZoomRatio = 1.0f
@@ -1063,80 +1166,88 @@ class FloatingCameraService : Service(),
             if (currentCameraFacingName == "front") {
                 currentZoomRatio = 1.0f
             }
+
+            val selectedRange = if (useHighSpeedSession) {
+                validHsRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
+                    ?: validHsRanges.filter { it.upper == 60 }.maxWithOrNull(compareBy<Range<Int>> { it.lower })
+                    ?: validHsRanges.minWithOrNull(compareBy<Range<Int>> { it.upper }.thenByDescending { it.lower })
+                    ?: Range(60, 60)
+            } else {
+                pickBestFpsRange(normalRanges, effectiveSensorFps)
+            }
+            activeSelectedRange = selectedRange
+            activeFpsRangeStr = selectedRange.toString()
+            Log.i("ROUTING_DEBUG", "[Camera2] FPS: camera=$currentCameraFacingName (id=${camera.id}, physId=$activePhysicalCameraId), targetFps=$targetFps, effectiveSensorFps=$effectiveSensorFps, maxSensorFps=$activeMaxFps, selectedRange=$selectedRange, highSpeed=$useHighSpeedSession, normalRanges=$normalRanges, hsRanges=$hsRanges")
+
             currentCaptureRequestBuilder = builder
             applyZoomToBuilder(builder)
             applyManualControlsToBuilder(builder)
 
-            val targetChars = if (activePhysicalCameraId != null) {
-                try { manager.getCameraCharacteristics(activePhysicalCameraId!!) } catch (_: Exception) { chars }
-            } else chars
-            val availableFpsRanges = targetChars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            val normalRanges = availableFpsRanges?.filter { it.upper <= 60 } ?: emptyList()
-            val hwUpper = normalRanges.map { it.upper }.maxOrNull() ?: 30
-            val isAux30Capped = (camera.id == ultraWideCameraId || camera.id == macroCameraId ||
-                                 camera.id == "50" || camera.id == "54") && (hwUpper <= 30)
-            val maxSensorFps = if (isAux30Capped || currentCameraFacingName == "front") hwUpper else maxOf(hwUpper, 60)
-            activeMaxFps = maxSensorFps
-            val effectiveSensorFps = minOf(targetFps, maxSensorFps)
-            activeSupportedFps = (normalRanges.map { it.upper } + listOf(30, 60)).distinct().sorted()
-
-            val selectedRange = if (effectiveSensorFps >= 60) {
-                // Priority 1: Exact fixed 60 FPS range [60, 60] (prevents AE from dropping to 30 in low light)
-                normalRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
-                    ?: normalRanges.firstOrNull { it.lower >= 30 && it.upper >= 60 }
-                    ?: normalRanges.firstOrNull { it.upper >= 60 }
-                    ?: Range(60, 60)
-            } else {
-                normalRanges.firstOrNull { it.lower == effectiveSensorFps && it.upper == effectiveSensorFps }
-                    ?: normalRanges.firstOrNull { it.upper == effectiveSensorFps }
-                    ?: normalRanges.firstOrNull { it.lower == 30 && it.upper == 30 }
-                    ?: normalRanges.firstOrNull { it.upper == 30 }
-                    ?: Range(30, 30)
-            }
-            activeFpsRangeStr = selectedRange.toString()
-            Log.i("ROUTING_DEBUG", "[Camera2] FPS: camera=$currentCameraFacingName (id=${camera.id}, physId=$activePhysicalCameraId), targetFps=$targetFps, effectiveSensorFps=$effectiveSensorFps, maxSensorFps=$activeMaxFps, selectedRange=$selectedRange")
-
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CameraMetadata.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectedRange)
 
-            if (currentLensName == "macro") {
-                if (activeAfModes?.contains(CameraMetadata.CONTROL_AF_MODE_MACRO) == true) {
-                    builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_MACRO)
-                } else if (activeAfModes?.contains(CameraMetadata.CONTROL_AF_MODE_AUTO) == true) {
-                    builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
+            var appliedVendorKeys = ""
+            if (!useHighSpeedSession) {
+                builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CameraMetadata.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
+                if (effectiveSensorFps >= 60) {
+                    val antibandingModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)
+                    if (antibandingModes?.contains(CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_OFF) == true) {
+                        builder.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_OFF)
+                    }
+                    // Проверяем наличие MediaTek High-FPS vendor keys в характеристиках камеры
+                    val availReqKeys = targetChars.availableCaptureRequestKeys ?: emptyList()
+                    for (k in availReqKeys) {
+                        if (k.name == "com.mediatek.streamingfeature.hfpsMode" || k.name == "com.mediatek.streaming.feature.hfpsMode") {
+                            try {
+                                @Suppress("UNCHECKED_CAST")
+                                builder.set(k as CaptureRequest.Key<Int>, 1)
+                                appliedVendorKeys += "${k.name}=1;"
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+
+                if (currentLensName == "macro") {
+                    if (activeAfModes?.contains(CameraMetadata.CONTROL_AF_MODE_MACRO) == true) {
+                        builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_MACRO)
+                    } else if (activeAfModes?.contains(CameraMetadata.CONTROL_AF_MODE_AUTO) == true) {
+                        builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
+                    }
+                }
+                val faceDetectModes = chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES)
+                val maxFaceMode = faceDetectModes?.maxOrNull() ?: CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
+                val canDetectFaces = (maxFaceMode != CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
+                if (isAutoFramingEnabled && canDetectFaces) {
+                    builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, maxFaceMode)
+                } else {
+                    builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
+                }
+                val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                hasOis = oisModes?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+                val eisModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                hasEis = eisModes?.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
+
+                val stabOis = if (isStabilization && hasOis) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                val stabEis = if (isStabilization && hasEis && !is4KStream && effectiveSensorFps < 60) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+                builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, stabOis)
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, stabEis)
+                builder.set(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
+                builder.set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_DEFAULT)
+                }
+
+                if (isTorchOn && currentCameraFacingName == "back") {
+                    builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                } else {
+                    builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
                 }
             }
-            val faceDetectModes = chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES)
-            val maxFaceMode = faceDetectModes?.maxOrNull() ?: CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
-            val canDetectFaces = (maxFaceMode != CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
-            if (isAutoFramingEnabled && canDetectFaces) {
-                builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, maxFaceMode)
-            } else {
-                builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
-            }
-            val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
-            hasOis = oisModes?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
-            val eisModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-            hasEis = eisModes?.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
 
-            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
-            val stabOis = if (isStabilization && hasOis) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
-            val stabEis = if (isStabilization && hasEis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
-            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, stabOis)
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, stabEis)
-            Log.i("ROUTING_DEBUG", "[Stabilization] Applied to session: OIS=$stabOis (avail=$hasOis), EIS=$stabEis (avail=$hasEis), isStabilization=$isStabilization")
-            builder.set(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
-            builder.set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_DEFAULT)
-            }
-
-            if (isTorchOn && currentCameraFacingName == "back") {
-                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
-            } else {
-                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
-            }
+            captureFpsWindowStartNs = 0L
+            captureFpsCounter = 0
+            lastSessionDiag = "cam=${camera.id},hs=$useHighSpeedSession,hsFb=$highSpeedFallbackTried,range=$selectedRange,surf=${surfaces.size},gl=${glRenderer != null},vendor=$appliedVendorKeys"
 
             val sessionCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
@@ -1147,6 +1258,22 @@ class FloatingCameraService : Service(),
                             request: CaptureRequest,
                             result: TotalCaptureResult
                         ) {
+                            result.get(CaptureResult.SENSOR_FRAME_DURATION)?.let { lastSensorFrameDurationNs = it }
+                            result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastSensorExposureNs = it }
+                            result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastSensorIso = it }
+                            val nowNs = System.nanoTime()
+                            if (captureFpsWindowStartNs == 0L) {
+                                captureFpsWindowStartNs = nowNs
+                                captureFpsCounter = 0
+                            } else {
+                                captureFpsCounter++
+                                val dtNs = nowNs - captureFpsWindowStartNs
+                                if (dtNs >= 1_000_000_000L) {
+                                    actualCaptureFps = (captureFpsCounter * 1_000_000_000.0 / dtNs).toFloat()
+                                    captureFpsWindowStartNs = nowNs
+                                    captureFpsCounter = 0
+                                }
+                            }
                             if (isAutoFramingEnabled) {
                                 val faces = result.get(CaptureResult.STATISTICS_FACES)
                                 val isFront = (currentCameraFacingName == "front")
@@ -1156,10 +1283,20 @@ class FloatingCameraService : Service(),
                     }
                     cameraCaptureCallback = callback
                     try {
-                        session.setRepeatingRequest(builder.build(), callback, getCameraHandler())
-                        Log.i("ROUTING_DEBUG", "Сессия запущена с таргетами: surfaces.size = ${surfaces.size} (экран + кодек), physId=$activePhysicalCameraId")
+                        if (useHighSpeedSession && session is CameraConstrainedHighSpeedCaptureSession) {
+                            val burst = session.createHighSpeedRequestList(builder.build())
+                            session.setRepeatingBurst(burst, callback, getCameraHandler())
+                            highSpeedFallbackTried = false
+                            lastSessionDiag += ",status=HS_RUNNING(burst=${burst.size})"
+                            Log.i("ROUTING_DEBUG", "HighSpeed 60 FPS сессия запущена: burstSize=${burst.size}, range=$selectedRange")
+                        } else {
+                            session.setRepeatingRequest(builder.build(), callback, getCameraHandler())
+                            lastSessionDiag += ",status=NORMAL_RUNNING"
+                            Log.i("ROUTING_DEBUG", "Сессия запущена с таргетами: surfaces.size = ${surfaces.size} (экран + кодек), physId=$activePhysicalCameraId")
+                        }
                         val orient = streamOrientation()
                         val isLand = (orient == 0 || orient == 180)
+                        val wasSwitching = isSwitching
                         val statusJson = org.json.JSONObject()
                             .put("orient", orient)
                             .put("orientation", if (isLand) "horizontal" else "vertical")
@@ -1167,21 +1304,36 @@ class FloatingCameraService : Service(),
                             .put("width", targetWidth)
                             .put("height", targetHeight)
                             .put("fps", selectedRange.upper)
-                            .put("camera_switch", true)
+                            .put("camera_switch", wasSwitching)
                             .toString()
-                        streamer?.flushVideoQueue()
+                        if (wasSwitching) {
+                            streamer?.flushVideoQueue()
+                        }
                         streamer?.enqueueStatus(statusJson)
                         streamer?.requestSyncFrame()
-                        getCameraHandler().postDelayed({ streamer?.requestSyncFrame() }, 80)
-                        getCameraHandler().postDelayed({ streamer?.requestSyncFrame() }, 220)
+                        if (wasSwitching) {
+                            getCameraHandler().postDelayed({ streamer?.requestSyncFrame() }, 80)
+                            isSwitching = false
+                        }
                         notifyStatusUpdated()
                     } catch (e: Exception) {
+                        lastSessionDiag += ",repeatErr=${e.message}"
                         Log.e("ROUTING_DEBUG", "Ошибка setRepeatingRequest: ", e)
                     }
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    Log.e("ROUTING_DEBUG", "Ошибка конфигурации сессии (physId=$activePhysicalCameraId)")
+                    lastSessionDiag += ",status=CONFIGURE_FAILED"
+                    Log.e("ROUTING_DEBUG", "Ошибка конфигурации сессии (physId=$activePhysicalCameraId, highSpeed=$useHighSpeedSession)")
+                    if (useHighSpeedSession && !highSpeedFallbackTried) {
+                        Log.w("ROUTING_DEBUG", "Откат с HighSpeed сессии на обычную сессию")
+                        highSpeedFallbackTried = true
+                        val cam = cameraDevice
+                        if (cam != null) {
+                            getCameraHandler().postDelayed({ startCamera2Session(cam) }, 150)
+                        }
+                        return
+                    }
                     if (activePhysicalCameraId != null) {
                         Log.w("ROUTING_DEBUG", "Откат с физической сессии на логическую камеру 0")
                         activePhysicalCameraId = null
@@ -1193,18 +1345,33 @@ class FloatingCameraService : Service(),
                 }
             }
 
-            if (activePhysicalCameraId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (useHighSpeedSession) {
+                @Suppress("DEPRECATION")
+                camera.createConstrainedHighSpeedCaptureSession(surfaces, sessionCallback, getCameraHandler())
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && (appliedVendorKeys.isNotEmpty() || activePhysicalCameraId != null)) {
                 val outputConfigs = surfaces.map { s ->
                     OutputConfiguration(s).apply {
-                        setPhysicalCameraId(activePhysicalCameraId)
+                        if (activePhysicalCameraId != null) {
+                            setPhysicalCameraId(activePhysicalCameraId)
+                        }
                     }
                 }
-                camera.createCaptureSessionByOutputConfigurations(outputConfigs, sessionCallback, getCameraHandler())
+                val cfg = SessionConfiguration(
+                    SessionConfiguration.SESSION_REGULAR,
+                    outputConfigs,
+                    java.util.concurrent.Executor { getCameraHandler().post(it) },
+                    sessionCallback
+                ).apply {
+                    sessionParameters = builder.build()
+                }
+                camera.createCaptureSession(cfg)
             } else {
                 @Suppress("DEPRECATION")
                 camera.createCaptureSession(surfaces, sessionCallback, getCameraHandler())
             }
         } catch (e: Exception) {
+            lastSessionDiag += ",createErr=${e.message}"
+            isSwitching = false
             Log.e("ROUTING_DEBUG", "Ошибка создания Camera2 сессии: ", e)
         }
     }
@@ -1273,23 +1440,66 @@ class FloatingCameraService : Service(),
         if (orientationListener != null || accelSensorListener != null) return
         try {
             val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-            val accel = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-            if (sm != null && accel != null) {
+            val gravitySensor = sm?.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            val accelSensor = if (gravitySensor == null) sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) else null
+            val activeSensor = gravitySensor ?: accelSensor
+            val isUsingGravity = (gravitySensor != null)
+
+            if (sm != null && activeSensor != null) {
                 accelSensorListener = object : SensorEventListener {
                     private var lastTick = 0L
+                    private var filteredX = 0f
+                    private var filteredY = 0f
+                    private var filteredZ = 0f
+                    private var hasFilteredInit = false
+                    private var pendingOrientation = -1
+                    private var pendingSinceMs = 0L
+
                     override fun onSensorChanged(event: SensorEvent?) {
                         if (event == null) return
+
+                        val rawX = -event.values[0]
+                        val rawY = -event.values[1]
+                        val rawZ = event.values[2]
+                        val x: Float
+                        val y: Float
+                        val z: Float
+
+                        if (isUsingGravity) {
+                            x = rawX
+                            y = rawY
+                            z = rawZ
+                        } else {
+                            // Low-Pass фильтр отсекает высокочастотную тряску при отсутствии аппаратного TYPE_GRAVITY
+                            if (!hasFilteredInit) {
+                                filteredX = rawX
+                                filteredY = rawY
+                                filteredZ = rawZ
+                                hasFilteredInit = true
+                            } else {
+                                val alpha = 0.15f
+                                filteredX += alpha * (rawX - filteredX)
+                                filteredY += alpha * (rawY - filteredY)
+                                filteredZ += alpha * (rawZ - filteredZ)
+                            }
+                            x = filteredX
+                            y = filteredY
+                            z = filteredZ
+                        }
+
                         val now = android.os.SystemClock.elapsedRealtime()
                         if (now - lastTick < 80L) return
                         lastTick = now
 
-                        // Идентично системному Android OrientationEventListener:
-                        val x = -event.values[0]
-                        val y = -event.values[1]
                         val magnitude = x * x + y * y
+                        val absZ = Math.abs(z)
 
-                        // Если телефон лежит на столе (плоско), ориентацию не меняем (вектор в плоскости XY мал)
-                        if (magnitude < 2.0f) return
+                        // Защита конусом по оси Z (~40° от вертикали): если телефон направлен под себя/в потолок
+                        // или лежит плоско на столе, не реагируем на крены и не крутим кадр
+                        if (magnitude < 25.0f || Math.sqrt(magnitude.toDouble()) < absZ * 0.85) {
+                            pendingOrientation = -1
+                            return
+                        }
 
                         // Угол поворота устройства в градусах (0..359):
                         // 0 = вертикально (портрет), 90 = альбом (поворот по часовой, верх справа),
@@ -1304,16 +1514,26 @@ class FloatingCameraService : Service(),
                         val cur = deviceOrientationDegrees
                         val diffFromCur = Math.abs((orientation - cur + 540) % 360 - 180)
                         if (diffFromCur < 55) {
+                            pendingOrientation = -1
                             return
                         }
 
                         val targetSnapped = ((orientation + 45) / 90 * 90) % 360
+                        if (pendingOrientation != targetSnapped) {
+                            pendingOrientation = targetSnapped
+                            pendingSinceMs = now
+                            return
+                        }
+                        if (now - pendingSinceMs < 320L) {
+                            return
+                        }
+                        pendingOrientation = -1
                         updateOrientationFromSnapped(targetSnapped)
                     }
                     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
                 }
-                sm.registerListener(accelSensorListener, accel, SensorManager.SENSOR_DELAY_UI)
-                Log.i("ROUTING_DEBUG", "Акселерометр для ориентации успешно запущен")
+                sm.registerListener(accelSensorListener, activeSensor, SensorManager.SENSOR_DELAY_UI)
+                Log.i("ROUTING_DEBUG", "Датчик ориентации запущен: ${if (isUsingGravity) "TYPE_GRAVITY (sensor fusion)" else "TYPE_ACCELEROMETER + Low-Pass"}")
             } else {
                 // Резервный системный OrientationEventListener (только если нет акселерометра)
                 orientationListener = object : OrientationEventListener(this, SensorManager.SENSOR_DELAY_NORMAL) {
@@ -1357,21 +1577,23 @@ class FloatingCameraService : Service(),
             glRenderer?.autoFraming?.isEnabled = true
         }
 
-        currentCaptureRequestBuilder?.let { b ->
-            val faceMode = if (enabled) CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE else CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
-            b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, faceMode)
-            try {
-                cameraCaptureCallback?.let { cb ->
-                    cameraCaptureSession?.setRepeatingRequest(b.build(), cb, getCameraHandler())
+        getCameraHandler().post {
+            val builder = currentCaptureRequestBuilder
+            val session = cameraCaptureSession
+            if (builder != null && session != null) {
+                val faceMode = if (enabled) CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE else CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
+                builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, faceMode)
+                try {
+                    cameraCaptureCallback?.let { cb ->
+                        session.setRepeatingRequest(builder.build(), cb, getCameraHandler())
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Ошибка переключения детекции лиц", e)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Ошибка переключения детекции лиц", e)
             }
-        }
-        if (enabled && glRenderer == null) {
-            rebindResolutionOnly(targetWidth, targetHeight)
-        } else if (!enabled && !useGlPipeline && glRenderer != null) {
-            rebindResolutionOnly(targetWidth, targetHeight)
+            if ((enabled && glRenderer == null) || (!enabled && !useGlPipeline && glRenderer != null)) {
+                rebindResolutionOnly(targetWidth, targetHeight)
+            }
         }
         Log.i("ROUTING_DEBUG", "Auto-Framing переключен: $enabled")
     }
@@ -1606,7 +1828,10 @@ class FloatingCameraService : Service(),
                 }
             }
 
-            lenses.add("0.5x")
+            val curZoomRange = zoomRatioRange
+            if (hasWide || ultraWideCameraId != null || (curZoomRange != null && curZoomRange.lower <= 0.75f)) {
+                lenses.add("0.5x")
+            }
             lenses.add("1x")
             if (hasMacroCameraHardware || macroCameraId != null) lenses.add("macro")
             lenses.add("front")
@@ -1616,7 +1841,7 @@ class FloatingCameraService : Service(),
         } catch (e: Exception) {
             Log.w("ROUTING_DEBUG", "getAvailableLenses error", e)
         }
-        val fallback = listOf("0.5x", "1x", "front")
+        val fallback = listOf("1x", "front")
         cachedAvailableLenses = fallback
         return fallback
     }
@@ -1637,24 +1862,11 @@ class FloatingCameraService : Service(),
             val availableFpsRanges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
 
             if (currentZoomRatio <= 0.75f) {
-                val safe30Range = availableFpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
-                    ?: availableFpsRanges?.firstOrNull { it.upper == 30 }
-                    ?: availableFpsRanges?.firstOrNull { it.upper <= 30 }
-                    ?: Range(15, 30)
+                val availList = availableFpsRanges?.toList() ?: emptyList()
+                val safe30Range = pickBestFpsRange(availList, 30)
                 builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, safe30Range)
             } else {
-                val effectiveFps = targetFps
-                val normalRange = if (effectiveFps >= 60) {
-                    availableFpsRanges?.firstOrNull { it.lower == 60 && it.upper == 60 }
-                        ?: availableFpsRanges?.firstOrNull { it.lower >= 30 && it.upper >= 60 }
-                        ?: availableFpsRanges?.firstOrNull { it.upper >= 60 }
-                        ?: Range(60, 60)
-                } else {
-                    availableFpsRanges?.firstOrNull { it.lower == effectiveFps && it.upper == effectiveFps }
-                        ?: availableFpsRanges?.firstOrNull { it.upper == effectiveFps }
-                        ?: Range(30, 30)
-                }
-                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, normalRange)
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeSelectedRange)
             }
 
             if (currentZoomRatio < 1.0f) {
@@ -1932,8 +2144,10 @@ class FloatingCameraService : Service(),
         val builder = currentCaptureRequestBuilder ?: return
         getCameraHandler().post {
             try {
+                val is4KStream = (targetWidth >= 3840 || targetHeight >= 2160)
+                val effectiveSensorFps = minOf(targetFps, activeMaxFps)
                 val oisVal = if (enabled && hasOis) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
-                val eisVal = if (enabled && hasEis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                val eisVal = if (enabled && hasEis && !is4KStream && effectiveSensorFps < 60) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
                 builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, oisVal)
                 builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisVal)
                 session.setRepeatingRequest(builder.build(), cameraCaptureCallback, getCameraHandler())
@@ -2188,7 +2402,7 @@ class FloatingCameraService : Service(),
             height = targetHeight,
             resolution = "${targetWidth}x${targetHeight}",
             isAutoFraming = isAutoFramingEnabled,
-            pipelineMode = if (useGlPipeline || isAutoFramingEnabled) "gl" else "direct",
+            pipelineMode = if (glRenderer != null) "gl" else "direct",
             availableLenses = getAvailableLenses(),
             isStabilization = isStabilization,
             hasOis = hasOis,
@@ -2216,29 +2430,170 @@ class FloatingCameraService : Service(),
         )
     }
 
-    override fun onRequestUserPairing(clientId: String, clientName: String, onDecision: (Boolean) -> Unit) {
+    override fun getDiagnosticsJson(): String {
+        val root = org.json.JSONObject()
+        try {
+            root.put("version_code", BuildConfig.VERSION_CODE)
+            root.put("version_name", BuildConfig.VERSION_NAME)
+            root.put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
+            root.put("sdk_int", Build.VERSION.SDK_INT)
+            root.put("target_width", targetWidth)
+            root.put("target_height", targetHeight)
+            root.put("target_fps", targetFps)
+            root.put("active_range", activeFpsRangeStr)
+            root.put("actual_capture_fps", actualCaptureFps.toDouble())
+            root.put("last_sensor_frame_duration_ns", lastSensorFrameDurationNs)
+            root.put("last_sensor_exposure_ns", lastSensorExposureNs)
+            root.put("last_sensor_iso", lastSensorIso)
+            root.put("use_high_speed_active", useHighSpeedActive)
+            root.put("high_speed_fallback_tried", highSpeedFallbackTried)
+            root.put("last_session_diag", lastSessionDiag)
+
+            val manager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            val camsArr = org.json.JSONArray()
+            if (manager != null) {
+                for (id in manager.cameraIdList) {
+                    val cJson = org.json.JSONObject()
+                    cJson.put("id", id)
+                    try {
+                        val ch = manager.getCameraCharacteristics(id)
+                        cJson.put("facing", ch.get(CameraCharacteristics.LENS_FACING))
+                        cJson.put("hw_level", ch.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL))
+                        val aeRanges = ch.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                        cJson.put("normal_fps_ranges", aeRanges?.joinToString(", ") { it.toString() } ?: "")
+                        val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                        if (map != null) {
+                            val hsSizes = map.highSpeedVideoSizes ?: emptyArray()
+                            cJson.put("hs_sizes", hsSizes.joinToString(", ") { it.toString() })
+                            val hsMap = org.json.JSONObject()
+                            for (sz in hsSizes) {
+                                val r = map.getHighSpeedVideoFpsRangesFor(sz)
+                                hsMap.put(sz.toString(), r.joinToString(", ") { it.toString() })
+                            }
+                            cJson.put("hs_ranges", hsMap)
+                            val sz1080 = android.util.Size(1920, 1080)
+                            cJson.put("min_dur_codec_1080p_ns", try { map.getOutputMinFrameDuration(android.media.MediaCodec::class.java, sz1080) } catch (_: Exception) { -1L })
+                            cJson.put("min_dur_st_1080p_ns", try { map.getOutputMinFrameDuration(android.graphics.SurfaceTexture::class.java, sz1080) } catch (_: Exception) { -1L })
+                        }
+                        val reqKeys = ch.availableCaptureRequestKeys?.filter {
+                            val n = it.name.lowercase()
+                            n.contains("fps") || n.contains("speed") || n.contains("rate") || n.contains("hfps") || n.contains("mediatek") || n.contains("samsung")
+                        }?.map { it.name } ?: emptyList()
+                        cJson.put("vendor_req_keys", org.json.JSONArray(reqKeys))
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            val sessKeys = ch.availableSessionKeys?.map { it.name } ?: emptyList()
+                            cJson.put("session_keys", org.json.JSONArray(sessKeys))
+                        }
+                    } catch (e: Exception) {
+                        cJson.put("error", e.message)
+                    }
+                    camsArr.put(cJson)
+                }
+            }
+            root.put("cameras", camsArr)
+        } catch (e: Exception) {
+            root.put("error", e.message)
+        }
+        return root.toString()
+    }
+
+    override fun onRequestUserPairing(clientId: String, clientName: String, onDecision: (PairingDecision) -> Unit) {
         Log.i("ROUTING_DEBUG", "onRequestUserPairing: clientId=$clientId, clientName=$clientName")
         Handler(Looper.getMainLooper()).post {
             try {
-                if (Settings.canDrawOverlays(this)) {
-                    AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle(R.string.pairing_title)
-                        .setMessage(getString(R.string.pairing_message, clientName))
-                        .setCancelable(false)
-                        .setPositiveButton(R.string.pairing_allow) { _, _ -> onDecision(true) }
-                        .setNegativeButton(R.string.pairing_decline) { _, _ -> onDecision(false) }
-                        .create().apply {
-                            window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
-                            show()
-                        }
-                } else {
-                    Log.w("ROUTING_DEBUG", "Разрешение на оверлей отсутствует, авто-подтверждение сопряжения для $clientName")
-                    onDecision(true)
+                PairingManager.registerPendingRequest(this, clientId, clientName, onDecision)
+
+                // 1. Полноэкранный системный диалог через PairingRequestActivity (поверх всех окон и экрана блокировки)
+                val intent = Intent(this, PairingRequestActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra("client_id", clientId)
+                    putExtra("client_name", clientName)
                 }
+
+                // 2. Heads-Up Notification как надежный резервный канал
+                showPairingNotification(clientId, clientName, intent)
+
+                // 3. Запуск Activity
+                startActivity(intent)
             } catch (e: Exception) {
-                Log.e("ROUTING_DEBUG", "Ошибка отображения диалога сопряжения", e)
-                onDecision(true)
+                Log.e("ROUTING_DEBUG", "Ошибка показа окна сопряжения, используем уведомление", e)
+                // FAIL-CLOSED: Не авто-подтверждаем! Уведомление уже отправлено
             }
+        }
+    }
+
+    private fun showPairingNotification(clientId: String, clientName: String, fullScreenIntent: Intent) {
+        try {
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channelId = "virtual_cam_pairing_channel"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    channelId,
+                    getString(R.string.pairing_title),
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = getString(R.string.pairing_title)
+                    enableLights(true)
+                    enableVibration(true)
+                }
+                manager.createNotificationChannel(channel)
+            }
+
+            val fullScreenPendingIntent = PendingIntent.getActivity(
+                this,
+                1001,
+                fullScreenIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+
+            val allowAlwaysIntent = Intent(this, PairingActionReceiver::class.java).apply {
+                action = PairingActionReceiver.ACTION_ALLOW_ALWAYS
+            }
+            val allowAlwaysPending = PendingIntent.getBroadcast(
+                this,
+                1002,
+                allowAlwaysIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+
+            val allowOnceIntent = Intent(this, PairingActionReceiver::class.java).apply {
+                action = PairingActionReceiver.ACTION_ALLOW_ONCE
+            }
+            val allowOncePending = PendingIntent.getBroadcast(
+                this,
+                1003,
+                allowOnceIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+
+            val declineIntent = Intent(this, PairingActionReceiver::class.java).apply {
+                action = PairingActionReceiver.ACTION_DECLINE
+            }
+            val declinePending = PendingIntent.getBroadcast(
+                this,
+                1004,
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+
+            val notif = NotificationCompat.Builder(this, channelId)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(getString(R.string.pairing_title))
+                .setContentText(getString(R.string.pairing_message, clientName))
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setFullScreenIntent(fullScreenPendingIntent, true)
+                .setContentIntent(fullScreenPendingIntent)
+                .addAction(0, getString(R.string.pairing_allow_always), allowAlwaysPending)
+                .addAction(0, getString(R.string.pairing_allow_once), allowOncePending)
+                .addAction(0, getString(R.string.pairing_decline), declinePending)
+                .build()
+
+            manager.notify(PairingManager.PAIRING_NOTIFICATION_ID, notif)
+        } catch (e: Exception) {
+            Log.e("ROUTING_DEBUG", "Не удалось отправить уведомление сопряжения", e)
         }
     }
 
@@ -2266,11 +2621,13 @@ class FloatingCameraService : Service(),
     fun updateFpsOnTheFly(newFps: Int) {
         targetFps = newFps
         Log.i("ROUTING_DEBUG", "updateFpsOnTheFly: $newFps")
-        val camera = cameraDevice
-        if (camera != null) {
-            startCamera2Session(camera)
-        } else {
-            bindCamera()
+        getCameraHandler().post {
+            val camera = cameraDevice
+            if (camera != null) {
+                startCamera2Session(camera)
+            } else {
+                bindCamera()
+            }
         }
     }
 
@@ -2285,6 +2642,12 @@ class FloatingCameraService : Service(),
                     cameraCaptureSession?.close()
                 } catch (_: Exception) {}
                 cameraCaptureSession = null
+
+                // Обязательно освобождаем GL-рендерер до reinitCodec(), иначе drawFrame() обратится к уже освобождённой codecSurface
+                try {
+                    glRenderer?.release()
+                } catch (_: Exception) {}
+                glRenderer = null
 
                 val activeStreamer = streamer ?: RawH265Streamer(
                     port = 8554,
@@ -2316,12 +2679,16 @@ class FloatingCameraService : Service(),
         }
     }
 
-    fun applyStreamConfig(resolution: String, fps: Int, bitrate: Int) {
+    private var lastStreamConfigSignature: String = ""
+
+    fun applyStreamConfig(resolution: String, fps: Int, bitrate: Int, persist: Boolean = true) {
+        val sig = "$resolution:$fps:$bitrate"
         val now = System.currentTimeMillis()
-        if (now - lastStreamConfigTime < 300) {
-            Log.w("ROUTING_DEBUG", "applyStreamConfig: пропуск быстрого повтора (дребезг ${now - lastStreamConfigTime}мс)")
+        if (sig == lastStreamConfigSignature && now - lastStreamConfigTime < 150) {
+            Log.w("ROUTING_DEBUG", "applyStreamConfig: пропуск идентичного повтора ($sig, ${now - lastStreamConfigTime}мс)")
             return
         }
+        lastStreamConfigSignature = sig
         lastStreamConfigTime = now
 
         val (newWidth, newHeight) = when (resolution.lowercase()) {
@@ -2335,14 +2702,19 @@ class FloatingCameraService : Service(),
         val isFpsChanged = (fps != targetFps)
         val isBitrateChanged = (bitrate != targetBitrate)
 
+        if (!isResChanged && !isFpsChanged && !isBitrateChanged) {
+            Log.i("ROUTING_DEBUG", "applyStreamConfig: параметры совпадают с текущими, пропуск")
+            return
+        }
+
         Log.i("ROUTING_DEBUG", "applyStreamConfig: resolution=$resolution (${newWidth}x${newHeight}), fps=$fps, bitrate=$bitrate | isResChanged=$isResChanged, isFpsChanged=$isFpsChanged, isBitrateChanged=$isBitrateChanged")
 
         targetBitrate = bitrate
-        userConfiguredFps = fps
+        if (persist) userConfiguredFps = fps
         targetFps = fps
         targetWidth = newWidth
         targetHeight = newHeight
-        saveCameraPrefs()
+        if (persist) saveCameraPrefs()
 
         if (!isResChanged && !isFpsChanged && isBitrateChanged) {
             updateBitrateOnTheFly(bitrate)
@@ -2350,6 +2722,7 @@ class FloatingCameraService : Service(),
         }
 
         if (isResChanged || isFpsChanged) {
+            highSpeedFallbackTried = false
             rebindResolutionOnly(newWidth, newHeight)
             return
         }
@@ -2358,6 +2731,7 @@ class FloatingCameraService : Service(),
     fun switchCamera() {
         if (isSwitching) return
         isSwitching = true
+        highSpeedFallbackTried = false
 
         currentCameraFacingName = if (currentCameraFacingName == "back") "front" else "back"
 
@@ -2382,23 +2756,25 @@ class FloatingCameraService : Service(),
         isTorchOn = !isTorchOn
         Log.i("ROUTING_DEBUG", "toggleTorch: isTorchOn = $isTorchOn")
 
-        val session = cameraCaptureSession
-        val builder = currentCaptureRequestBuilder
-        if (session != null && builder != null) {
-            try {
-                builder.set(CaptureRequest.FLASH_MODE, if (isTorchOn) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF)
-                session.setRepeatingRequest(builder.build(), cameraCaptureCallback, getCameraHandler())
-                notifyStatusUpdated()
-                return
-            } catch (e: Exception) {
-                Log.w("ROUTING_DEBUG", "Ошибка быстрого переключения вспышки, перезапуск сессии", e)
+        getCameraHandler().post {
+            val session = cameraCaptureSession
+            val builder = currentCaptureRequestBuilder
+            if (session != null && builder != null) {
+                try {
+                    builder.set(CaptureRequest.FLASH_MODE, if (isTorchOn) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF)
+                    session.setRepeatingRequest(builder.build(), cameraCaptureCallback, getCameraHandler())
+                    notifyStatusUpdated()
+                    return@post
+                } catch (e: Exception) {
+                    Log.w("ROUTING_DEBUG", "Ошибка быстрого переключения вспышки, перезапуск сессии", e)
+                }
             }
+            val camera = cameraDevice
+            if (camera != null) {
+                startCamera2Session(camera)
+            }
+            notifyStatusUpdated()
         }
-        val camera = cameraDevice
-        if (camera != null) {
-            startCamera2Session(camera)
-        }
-        notifyStatusUpdated()
     }
 
     interface ServiceStatusListener {
